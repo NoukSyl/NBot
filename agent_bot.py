@@ -14,11 +14,12 @@ load_dotenv()
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Hugging Face Client
+# Hugging Face Client — model specified directly to avoid auto-router error
+HF_MODEL = "HuggingFaceH4/zephyr-7b-beta"  # Free, instruction-tuned, no provider issues
 hf_client = InferenceClient(
+    model=HF_MODEL,
     token=os.getenv("HUGGINGFACE_TOKEN")
 )
-HF_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
 
 # ---------- Admin Check ----------
 def is_admin(ctx_or_member):
@@ -319,7 +320,6 @@ USER REQUEST: {user_request}"""
             # Call AI
             try:
                 completion = hf_client.chat_completion(
-                    model=HF_MODEL,
                     messages=messages,
                     max_tokens=400,
                     temperature=0.3,
