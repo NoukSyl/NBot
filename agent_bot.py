@@ -15,7 +15,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Hugging Face Client — model specified directly to avoid auto-router error
-HF_MODEL = "HuggingFaceH4/zephyr-7b-beta"  # Free, instruction-tuned, no provider issues
+HF_MODEL = "deepseek-ai/DeepSeek-V4-Pro:novita"  # Free, instruction-tuned, no provider issues
 hf_client = InferenceClient(
     model=HF_MODEL,
     token=os.getenv("HUGGINGFACE_TOKEN")
