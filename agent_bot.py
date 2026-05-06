@@ -314,23 +314,24 @@ RULES:
 
 USER REQUEST: {user_request}"""
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"USER REQUEST: {user_request}"}
-        ]
+        # conversation history as plain text for text_generation
+        conversation = ""
 
         while step_num < self.MAX_STEPS:
             step_num += 1
 
-            # Call AI
+            # Build prompt: system + conversation so far
+            prompt = system_prompt + "\n" + conversation
+
+            # Call AI via text_generation (no router, works with free HF token)
             try:
-                completion = hf_client.chat_completion(
-                    messages=messages,
-                    max_tokens=400,
+                response = hf_client.text_generation(
+                    prompt,
+                    max_new_tokens=400,
                     temperature=0.3,
-                    stop=["Observation:"]
+                    stop_sequences=["Observation:"],
+                    do_sample=True,
                 )
-                response = completion.choices[0].message.content
             except Exception as e:
                 return f"❌ AI Error: {str(e)[:150]}"
 
