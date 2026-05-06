@@ -2,7 +2,7 @@ import os
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from langchain.llms import HuggingFaceEndpoint
+from langchain_huggingface import HuggingFaceEndpoint
 from langchain.agents import Tool, initialize_agent, AgentType
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import MessagesPlaceholder
