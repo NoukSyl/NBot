@@ -16,9 +16,9 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Hugging Face Client
 hf_client = InferenceClient(
-    "mistralai/Mistral-7B-Instruct-v0.3",
     token=os.getenv("HUGGINGFACE_TOKEN")
 )
+HF_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
 
 # ---------- Admin Check ----------
 def is_admin(ctx_or_member):
@@ -308,21 +308,26 @@ RULES:
 
 USER REQUEST: {user_request}"""
 
-        messages = [{"role": "user", "content": system_prompt}]
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"USER REQUEST: {user_request}"}
+        ]
 
         while step_num < self.MAX_STEPS:
             step_num += 1
 
             # Call AI
             try:
-                response = hf_client.text_generation(
-                    "\n".join([m["content"] for m in messages]),
-                    max_new_tokens=400,
+                completion = hf_client.chat_completion(
+                    model=HF_MODEL,
+                    messages=messages,
+                    max_tokens=400,
                     temperature=0.3,
-                    stop_sequences=["Observation:"]
+                    stop=["Observation:"]
                 )
+                response = completion.choices[0].message.content
             except Exception as e:
-                return f"❌ AI Error: {str(e)[:100]}"
+                return f"❌ AI Error: {str(e)[:150]}"
 
             steps.append(response)
 
@@ -402,12 +407,12 @@ agent = ReActAgent(bot, tools)
 async def on_ready():
     print(f'✅ {bot.user} is ONLINE — True ReAct Agent Mode')
     print(f'📡 Connected to {len(bot.guilds)} servers')
-    await bot.change_presence(activity=discord.Game(name="🤖 ReAct Agent | !god"))
+    await bot.change_presence(activity=discord.Game(name="🤖 ReAct Agent | !N"))
 
 
-@bot.command(name='god')
+@bot.command(name='N')
 @admin_only()
-async def god_cmd(ctx, *, prompt: str):
+async def N_cmd(ctx, *, prompt: str):
     """[ADMIN ONLY] Talk to the ReAct Agent"""
     status_msg = await ctx.send("🤔 Thinking...")
 
@@ -444,6 +449,24 @@ async def on_message(message):
 
             result = await agent.run(prompt, message.guild.id, message.channel.id, status_callback=update_status)
             await status_msg.edit(content=result[:1900])
+        await bot.process_commands(message)
+        return
+
+    # Admin auto-respond: if admin sends any message (not a command), reply without needing !N
+    if not message.content.startswith('!') and is_admin(message) and message.guild:
+        prompt = message.content.strip()
+        if prompt:
+            status_msg = await message.reply("🤔 Thinking...")
+
+            async def update_status_admin(text):
+                try:
+                    await status_msg.edit(content=text)
+                except:
+                    pass
+
+            result = await agent.run(prompt, message.guild.id, message.channel.id, status_callback=update_status_admin)
+            await status_msg.edit(content=result[:1900])
+        return
 
     await bot.process_commands(message)
 
