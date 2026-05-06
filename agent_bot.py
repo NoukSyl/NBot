@@ -27,13 +27,18 @@ def is_admin(ctx_or_member):
     if isinstance(ctx_or_member, commands.Context):
         member = ctx_or_member.author
         guild = ctx_or_member.guild
+    elif isinstance(ctx_or_member, discord.Message):
+        member = ctx_or_member.author
+        guild = ctx_or_member.guild
     else:
         member = ctx_or_member
-        guild = member.guild
+        guild = getattr(member, "guild", None)
 
-    if guild and guild.owner_id == member.id:
+    if not guild:
+        return False
+    if guild.owner_id == member.id:
         return True
-    if member.guild_permissions.administrator:
+    if isinstance(member, discord.Member) and member.guild_permissions.administrator:
         return True
     return False
 
