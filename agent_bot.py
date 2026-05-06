@@ -8,22 +8,23 @@ import re
 import asyncio
 import datetime
 import subprocess
-import requests
-from bs4 import BeautifulSoup
 
 load_dotenv()
 
+# ---------- Discord Setup ----------
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# Hugging Face Client
 hf_client = InferenceClient(
     "mistralai/Mistral-7B-Instruct-v0.3",
     token=os.getenv("HUGGINGFACE_TOKEN")
 )
 
+# ---------- Terminal Tools ----------
 class Terminal:
     @staticmethod
-    async def run_command(command: str, timeout: int = 30) -> str:
+    async def run_command(command: str) -> str:
         try:
             process = await asyncio.create_subprocess_shell(
                 command,
@@ -31,41 +32,34 @@ class Terminal:
                 stderr=asyncio.subprocess.PIPE,
                 cwd="/app"
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                process.kill()
-                return f"⏰ คำสั่งใช้เวลานานเกิน {timeout} วินาที"
-            
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
             output = stdout.decode('utf-8', errors='replace')
             error = stderr.decode('utf-8', errors='replace')
-            
             result = ""
             if output:
-                result += f"📤 OUTPUT:\n{output[:1800]}"
+                result += f"📤 {output[:1800]}"
             if error:
-                result += f"\n⚠️ ERROR:\n{error[:500]}"
-            if process.returncode != 0:
-                result += f"\n🔴 Exit code: {process.returncode}"
-            
-            return result[:1900] if result else f"✅ '{command}' รันสำเร็จ"
+                result += f"\n⚠️ {error[:500]}"
+            return result[:1900] if result else "✅ Done"
+        except asyncio.TimeoutError:
+            return "⏰ Timeout"
         except Exception as e:
             return f"❌ {str(e)}"
     
     @staticmethod
-    async def read_file(filepath: str) -> str:
+    async def read_file(path: str) -> str:
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return f"📄 {filepath}:\n```\n{f.read()[:1500]}\n```"
+            with open(path, 'r') as f:
+                return f"```\n{f.read()[:1500]}\n```"
         except Exception as e:
             return f"❌ {str(e)}"
     
     @staticmethod
-    async def write_file(filepath: str, content: str) -> str:
+    async def write_file(path: str, content: str) -> str:
         try:
-            with open(filepath, 'w', encoding='utf-8') as f:
+            with open(path, 'w') as f:
                 f.write(content)
-            return f"✅ เขียน {filepath} เรียบร้อย"
+            return f"✅ Written to {path}"
         except Exception as e:
             return f"❌ {str(e)}"
     
@@ -73,218 +67,221 @@ class Terminal:
     async def list_files(path: str = ".") -> str:
         try:
             files = os.listdir(path)
-            formatted = "\n".join([f"📁 {f}/" if os.path.isdir(os.path.join(path, f)) else f"📄 {f}" for f in files[:50]])
-            return f"📂 {path}:\n{formatted}"
+            return "\n".join([f"📄 {f}" for f in files[:30]])
         except Exception as e:
             return f"❌ {str(e)}"
 
-class WebTools:
-    @staticmethod
-    async def fetch_url(url: str) -> str:
-        """ดึงเนื้อหาจาก URL"""
-        try:
-            response = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # เอาเฉพาะ text
-            text = soup.get_text()
-            # ตัดเหลื่อม
-            text = re.sub(r'\n+', '\n', text)
-            return f"🌐 {url}:\n{text[:1500]}"
-        except Exception as e:
-            return f"❌ ดึงข้อมูลไม่ได้: {str(e)}"
-    
-    @staticmethod
-    async def search_web(query: str) -> str:
-        """ค้นหา Google (ใช้ DuckDuckGo แทน)"""
-        try:
-            url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-            response = requests.get(url, timeout=15)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = soup.find_all('a', class_='result__a')[:5]
-            if results:
-                links = []
-                for r in results:
-                    links.append(f"- {r.get_text()}")
-                return f"🔍 ผลการค้นหา '{query}':\n" + "\n".join(links)
-            return "🔍 ไม่พบผลการค้นหา"
-        except Exception as e:
-            return f"❌ {str(e)}"
-
+# ---------- Discord Tools ----------
 class DiscordTools:
     def __init__(self, bot):
         self.bot = bot
         self.terminal = Terminal()
-        self.web = WebTools()
     
-    # Terminal
-    async def run_terminal(self, command): return await self.terminal.run_command(command)
-    async def read_file(self, filepath): return await self.terminal.read_file(filepath)
-    async def write_file(self, filepath, content): return await self.terminal.write_file(filepath, content)
-    async def list_files(self, path="."): return await self.terminal.list_files(path)
-    
-    # Web
-    async def fetch_url(self, url): return await self.web.fetch_url(url)
-    async def search_web(self, query): return await self.web.search_web(query)
-    
-    # Discord Moderation
-    async def delete_messages(self, channel_id, amount=10):
-        channel = self.bot.get_channel(int(channel_id))
+    async def delete_messages(self, channel_id: int, amount: int = 10):
+        channel = self.bot.get_channel(channel_id)
         if channel:
             deleted = await channel.purge(limit=amount)
-            return f"✅ ลบ {len(deleted)} ข้อความ"
-        return "❌ ไม่พบแชท"
+            return f"✅ Deleted {len(deleted)} messages"
+        return "❌ Channel not found"
     
-    async def kick_member(self, guild_id, member_name, reason=""):
-        guild = self.bot.get_guild(int(guild_id))
+    async def kick(self, guild_id: int, member_name: str, reason: str = ""):
+        guild = self.bot.get_guild(guild_id)
         if guild:
             for member in guild.members:
                 if member_name.lower() in member.name.lower():
                     await member.kick(reason=reason)
-                    return f"✅ เตะ {member.name}"
-        return f"❌ ไม่พบ {member_name}"
+                    return f"✅ Kicked {member.name}"
+        return f"❌ Member {member_name} not found"
     
-    async def ban_member(self, guild_id, member_name, reason=""):
-        guild = self.bot.get_guild(int(guild_id))
+    async def ban(self, guild_id: int, member_name: str, reason: str = ""):
+        guild = self.bot.get_guild(guild_id)
         if guild:
             for member in guild.members:
                 if member_name.lower() in member.name.lower():
                     await member.ban(reason=reason)
-                    return f"✅ แบน {member.name}"
-        return f"❌ ไม่พบ {member_name}"
+                    return f"✅ Banned {member.name}"
+        return f"❌ Member {member_name} not found"
     
-    async def create_channel(self, guild_id, name, channel_type="text"):
-        guild = self.bot.get_guild(int(guild_id))
+    async def create_channel(self, guild_id: int, name: str):
+        guild = self.bot.get_guild(guild_id)
         if guild:
-            if channel_type == "text":
-                channel = await guild.create_text_channel(name)
-            else:
-                channel = await guild.create_voice_channel(name)
-            return f"✅ สร้าง #{channel.name}"
-        return "❌ ไม่พบเซิร์ฟเวอร์"
+            channel = await guild.create_text_channel(name)
+            return f"✅ Created #{channel.name}"
+        return "❌ Guild not found"
     
-    async def delete_channel(self, channel_id):
-        channel = self.bot.get_channel(int(channel_id))
+    async def delete_channel(self, channel_id: int):
+        channel = self.bot.get_channel(channel_id)
         if channel:
             await channel.delete()
-            return f"✅ ลบ {channel.name}"
-        return "❌ ไม่พบห้อง"
+            return f"✅ Deleted #{channel.name}"
+        return "❌ Channel not found"
     
-    async def send_dm(self, user_id, message):
-        user = await self.bot.fetch_user(int(user_id))
+    async def send_dm(self, user_id: int, message: str):
+        user = await self.bot.fetch_user(user_id)
         if user:
             await user.send(message)
-            return f"✅ ส่งถึง {user.name}"
-        return "❌ ไม่พบผู้ใช้"
+            return f"✅ Sent DM to {user.name}"
+        return "❌ User not found"
     
-    async def get_members(self, guild_id):
-        guild = self.bot.get_guild(int(guild_id))
+    async def get_members(self, guild_id: int):
+        guild = self.bot.get_guild(guild_id)
         if guild:
-            members = "\n".join([f"- {m.name}" for m in guild.members[:20]])
-            return f"👥 {len(guild.members)} คน:\n{members}"
-        return "❌ ไม่พบ"
+            names = [m.name for m in guild.members[:20]]
+            return f"Members ({len(guild.members)}):\n" + "\n".join(names)
+        return "❌ Guild not found"
     
-    async def get_channels(self, guild_id):
-        guild = self.bot.get_guild(int(guild_id))
-        if guild:
-            channels = "\n".join([f"#{c.name}" for c in guild.text_channels[:20]])
-            return f"💬 {len(guild.text_channels)} ห้อง:\n{channels}"
-        return "❌ ไม่พบ"
-    
-    async def timeout_member(self, guild_id, member_name, minutes):
-        guild = self.bot.get_guild(int(guild_id))
+    async def timeout(self, guild_id: int, member_name: str, minutes: int):
+        guild = self.bot.get_guild(guild_id)
         if guild:
             for member in guild.members:
                 if member_name.lower() in member.name.lower():
                     duration = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
                     await member.timeout(duration)
-                    return f"✅ จำกัด {member.name} {minutes} นาที"
-        return f"❌ ไม่พบ {member_name}"
+                    return f"✅ Timed out {member.name} for {minutes} minutes"
+        return f"❌ Member {member_name} not found"
     
-    async def search_chat(self, channel_id, keyword, limit=100):
-        channel = self.bot.get_channel(int(channel_id))
+    async def search(self, channel_id: int, keyword: str, limit: int = 100):
+        channel = self.bot.get_channel(channel_id)
         if channel:
             results = []
             async for msg in channel.history(limit=limit):
                 if keyword.lower() in msg.content.lower():
-                    results.append(f"{msg.author.name}: {msg.content[:100]}")
+                    results.append(f"{msg.author.name}: {msg.content[:80]}")
             if results:
-                return f"🔍 พบ {len(results)}:\n" + "\n".join(results[:10])
-            return f"🔍 ไม่พบ '{keyword}'"
-        return "❌ ไม่พบห้อง"
+                return f"Found {len(results)}:\n" + "\n".join(results[:10])
+            return f"No results for '{keyword}'"
+        return "❌ Channel not found"
     
-    async def get_system_info(self):
-        return await self.terminal.run_command("echo '🐍 Python:' && python --version 2>&1 && echo '📁 PWD:' && pwd && echo '📂 Files:' && ls -la | head -10")
+    # Terminal commands
+    async def terminal(self, command: str):
+        return await self.terminal.run_command(command)
     
-    async def restart_self(self):
+    async def cat(self, path: str):
+        return await self.terminal.read_file(path)
+    
+    async def write(self, path: str, content: str):
+        return await self.terminal.write_file(path, content)
+    
+    async def ls(self, path: str = "."):
+        return await self.terminal.list_files(path)
+    
+    async def info(self):
+        result = await self.terminal.run_command("python --version && echo '---' && pwd && echo '---' && ls -la | head -5")
+        return f"📊 System Info:\n{result}"
+    
+    async def restart(self):
         asyncio.create_task(self._restart_task())
-        return "🔄 กำลังรีสตาร์ท..."
+        return "🔄 Restarting..."
     
     async def _restart_task(self):
         await asyncio.sleep(2)
         os._exit(0)
 
+# ---------- AI Agent ----------
 class GodAgent:
     def __init__(self, bot, tools):
         self.bot = bot
         self.tools = tools
         self.memory = []
     
-    async def think_and_act(self, prompt, channel_id, guild_id, author_id):
-        tool_list = [f"- {m}" for m in dir(self.tools) if not m.startswith("_") and callable(getattr(self.tools, m)) and m not in ['bot', 'terminal', 'web']]
+    async def think(self, prompt: str, guild_id: int, channel_id: int) -> str:
+        # Build tool list
+        tool_list = []
+        for name in dir(self.tools):
+            if not name.startswith("_") and callable(getattr(self.tools, name)):
+                tool_list.append(f"- {name}")
         
-        system_prompt = f"""คุณคือ GOD MODE AI Agent มีอำนาจเต็ม
+        system_prompt = f"""You are a GOD MODE AI Agent with FULL CONTROL over Discord.
 
-Tools: {tool_list}
+AVAILABLE TOOLS:
+{chr(10).join(tool_list)}
 
-Context: guild={guild_id}, channel={channel_id}
+Current context:
+- guild_id: {guild_id}
+- channel_id: {channel_id}
 
-Memory: {chr(10).join(self.memory[-10:])}
+Recent memory:
+{chr(10).join(self.memory[-8:])}
 
-User: {prompt}
+User request: "{prompt}"
 
-ตอบเป็น JSON: {{"action": "tool_name", "args": [arg1, arg2]}} หรือตอบข้อความปกติ"""
+IMPORTANT: Respond ONLY with a JSON object in this format:
+{{"action": "tool_name", "args": [arg1, arg2, ...]}}
 
-        response = hf_client.text_generation(system_prompt, max_new_tokens=400, temperature=0.5)
-        
+If user just asked a question (not asking you to DO something), respond with a normal text message.
+
+Choose the right tool and execute immediately. Don't ask questions back."""
+
         try:
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            response = hf_client.text_generation(
+                system_prompt,
+                max_new_tokens=300,
+                temperature=0.5
+            )
+            
+            # Try to parse JSON
+            json_match = re.search(r'\{[^{}]*\}', response)
             if json_match:
                 cmd = json.loads(json_match.group())
                 action = cmd.get("action")
                 args = cmd.get("args", [])
-                if hasattr(self.tools, action):
+                
+                if action and hasattr(self.tools, action):
                     func = getattr(self.tools, action)
-                    result = await func(*args) if asyncio.iscoroutinefunction(func) else func(*args)
-                    self.memory.append(f"User: {prompt}\nResult: {result}")
+                    result = await func(*args)
+                    self.memory.append(f"Q: {prompt}\nA: {result[:100]}")
                     return result
-        except:
-            pass
-        
-        self.memory.append(f"User: {prompt}\nAssistant: {response[:200]}")
-        return response
+                else:
+                    return f"❌ Tool '{action}' not found. Available: {', '.join([t.replace('- ', '') for t in tool_list[:10]])}"
+            else:
+                # Normal text response
+                self.memory.append(f"Q: {prompt}\nA: {response[:100]}")
+                return response[:1900]
+                
+        except Exception as e:
+            return f"❌ Error: {str(e)[:100]}"
 
+# ---------- Discord Events ----------
 tools = DiscordTools(bot)
 agent = GodAgent(bot, tools)
 
 @bot.event
 async def on_ready():
-    print(f'✅ {bot.user} ONLINE!')
+    print(f'✅ {bot.user} is ONLINE with GOD MODE!')
+    print(f'📡 Connected to {len(bot.guilds)} servers')
     await bot.change_presence(activity=discord.Game(name="💀 GOD MODE | @me"))
+
+@bot.command(name='god')
+async def god_cmd(ctx, *, prompt: str):
+    """Talk to the God Agent"""
+    async with ctx.typing():
+        result = await agent.think(prompt, ctx.guild.id, ctx.channel.id)
+        await ctx.send(str(result)[:1900])
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
+    
+    # When bot is mentioned
     if bot.user in message.mentions:
         prompt = message.content.replace(f'<@{bot.user.id}>', '').strip()
         if prompt:
             async with message.channel.typing():
-                result = await agent.think_and_act(prompt, message.channel.id, message.guild.id, message.author.id)
+                result = await agent.think(prompt, message.guild.id, message.channel.id)
                 await message.reply(str(result)[:1900])
+    
     await bot.process_commands(message)
 
 @bot.command(name='ping')
 async def ping(ctx):
-    await ctx.send(f'🏓 {round(bot.latency * 1000)}ms')
+    await ctx.send(f'🏓 Pong! `{round(bot.latency * 1000)}ms`')
 
-bot.run(os.getenv("DISCORD_TOKEN"))
+@bot.command(name='clear_memory')
+async def clear_memory(ctx):
+    agent.memory = []
+    await ctx.send("🧹 Memory cleared!")
+
+# ---------- Run ----------
+if __name__ == "__main__":
+    bot.run(os.getenv("DISCORD_TOKEN"))
