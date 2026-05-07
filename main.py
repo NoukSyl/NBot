@@ -3,10 +3,10 @@ AI Agent - Hugging Face Serverless Inference
 Model: Qwen/Qwen3-32B (Free, best quality on HF)
 Deploy: Railway
 
-Fixes applied (from log analysis):
-  1. Chatbot type='messages'  → Fixed deprecation warning
-  2. gr.mount_gradio_app root_path="/ui" → Fixed /gradio_api/... 404
-  3. /theme.css 404 → Fixed by correct root_path
+Fixes applied:
+  v1: type='messages', root_path='/ui'         → fixed /gradio_api 404
+  v2: remove avatar_images emoji strings       → fixed /gradio_api/file= 403
+      font 404 is browser system-font fallback → harmless, no fix needed
 """
 
 import os
@@ -102,7 +102,7 @@ def chat(user_input: str, history: list, temperature: float, max_tokens: int):
 # ─────────────────────────────────────────
 # FastAPI
 # ─────────────────────────────────────────
-app = FastAPI(title="HF AI Agent", version="1.1")
+app = FastAPI(title="HF AI Agent", version="1.2")
 
 
 class ChatRequest(BaseModel):
@@ -165,13 +165,15 @@ def build_gradio() -> gr.Blocks:
         </div>
         """)
 
-        # FIX 1: type="messages" → removes UserWarning deprecation
         chatbot = gr.Chatbot(
             label="Conversation",
             type="messages",
             height=480,
             bubble_full_width=False,
-            avatar_images=("👤", "🤖"),
+            # FIX: ลบ avatar_images ออก — emoji ไม่ใช่ file path
+            # Gradio พยายาม serve "👤"/"🤖" เป็นไฟล์ → 403 Forbidden
+            # ใช้ None แทน (ไม่แสดง avatar ก็ได้ UI ปกติ)
+            avatar_images=(None, None),
             show_copy_button=True,
         )
 
@@ -222,8 +224,7 @@ def build_gradio() -> gr.Blocks:
     return demo
 
 
-# FIX 2: root_path="/ui" → fixes /gradio_api/queue/join 404
-#         and /theme.css 404 — Gradio needs to know its own mount point
+# root_path="/ui" → fixes /gradio_api/* routing under FastAPI mount
 gradio_demo = build_gradio()
 app = gr.mount_gradio_app(app, gradio_demo, path="/ui", root_path="/ui")
 
