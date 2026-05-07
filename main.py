@@ -748,13 +748,21 @@ def run_telegram_bot():
         tg_app.add_handler(CommandHandler("start", start))
         tg_app.add_handler(CommandHandler("clear", clear))
         tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        # initialize + start updater manually to skip signal handler registration
+        # (signal handlers only work in main thread)
+        await tg_app.initialize()
+        await tg_app.updater.start_polling()
+        await tg_app.start()
         print("🤖 Telegram bot started")
-        await tg_app.run_polling()
+        await asyncio.Event().wait()  # keep running
 
     def tg_thread():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(tg_main())
+        try:
+            loop.run_until_complete(tg_main())
+        except Exception as e:
+            print(f"[Telegram] error: {e}")
 
     threading.Thread(target=tg_thread, daemon=True).start()
 
