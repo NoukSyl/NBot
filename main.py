@@ -6,7 +6,7 @@ AI Agent v6
 - Model: Qwen/Qwen3-32B via HuggingFace
 """
 
-import os, re, json, subprocess, requests, secrets, hashlib
+import os, re, json, subprocess, requests, secrets, hashlib, threading, asyncio
 import gradio as gr
 from fastapi import FastAPI, Request, Response, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -15,6 +15,21 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 import uvicorn
+
+# Telegram
+try:
+    from telegram import Update
+    from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+    TELEGRAM_AVAILABLE = True
+except ImportError:
+    TELEGRAM_AVAILABLE = False
+
+# Discord
+try:
+    import discord
+    DISCORD_AVAILABLE = True
+except ImportError:
+    DISCORD_AVAILABLE = False
 
 # ─────────────────────────────────────────
 # Config
@@ -30,6 +45,9 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
 SUPABASE_URL   = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY   = os.getenv("SUPABASE_KEY", "")
 SESSION_TABLE  = os.getenv("SUPABASE_TABLE", "agent_memory")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+DISCORD_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
+DISCORD_PREFIX = os.getenv("DISCORD_PREFIX", "!")
 
 HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
 
@@ -662,6 +680,165 @@ app.add_middleware(AuthMiddleware)
 
 
 # ─────────────────────────────────────────
+# Helpers: split long messages
+# ─────────────────────────────────────────
+def split_message(text: str, limit: int) -> list[str]:
+    """Split text into chunks not exceeding limit chars."""
+    chunks = []
+    while len(text) > limit:
+        # Try to split at newline
+        split_at = text.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = limit
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    if text:
+        chunks.append(text)
+    return chunks
+
+def build_reply(user_text: str, session_id: str = "tg_default") -> str:
+    """Shared agent call used by both Telegram and Discord."""
+    history = memory_load(session_id)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    messages.append({"role": "user", "content": user_text})
+    final, _ = agent_loop(messages)
+    new_history = history + [
+        {"role": "user",      "content": user_text},
+        {"role": "assistant", "content": final},
+    ]
+    memory_save(session_id, new_history)
+    return final
+
+# ─────────────────────────────────────────
+# Telegram Bot
+# ─────────────────────────────────────────
+def run_telegram_bot():
+    if not TELEGRAM_AVAILABLE:
+        print("⚠️  python-telegram-bot not installed — Telegram disabled")
+        return
+    if not TELEGRAM_TOKEN:
+        print("⚠️  TELEGRAM_BOT_TOKEN not set — Telegram disabled")
+        return
+
+    async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "👋 สวัสดี! ฉันคือ AI Agent\n"
+            "พิมพ์ข้อความได้เลย หรือใช้ /clear เพื่อล้างประวัติ"
+        )
+
+    async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        sid = f"tg_{update.effective_user.id}"
+        memory_delete(sid)
+        await update.message.reply_text("🗑️ ล้างประวัติการสนทนาแล้ว")
+
+    async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_text = update.message.text
+        sid = f"tg_{update.effective_user.id}"
+        await update.message.chat.send_action("typing")
+        try:
+            reply = build_reply(user_text, sid)
+        except Exception as e:
+            reply = f"❌ Error: {e}"
+        # Telegram limit: 4096 chars
+        for chunk in split_message(reply, 4096):
+            await update.message.reply_text(chunk)
+
+    async def tg_main():
+        tg_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        tg_app.add_handler(CommandHandler("start", start))
+        tg_app.add_handler(CommandHandler("clear", clear))
+        tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        print("🤖 Telegram bot started")
+        await tg_app.run_polling()
+
+    def tg_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(tg_main())
+
+    threading.Thread(target=tg_thread, daemon=True).start()
+
+# ─────────────────────────────────────────
+# Discord Bot
+# ─────────────────────────────────────────
+def run_discord_bot():
+    if not DISCORD_AVAILABLE:
+        print("⚠️  discord.py not installed — Discord disabled")
+        return
+    if not DISCORD_TOKEN:
+        print("⚠️  DISCORD_BOT_TOKEN not set — Discord disabled")
+        return
+
+    intents = discord.Intents.default()
+    intents.message_content = True
+    client = discord.Client(intents=intents)
+
+    @client.event
+    async def on_ready():
+        print(f"🎮 Discord bot logged in as {client.user}")
+
+    @client.event
+    async def on_message(message: discord.Message):
+        if message.author == client.user:
+            return
+
+        content = message.content.strip()
+
+        # ── prefix command: !clear ──
+        if content == f"{DISCORD_PREFIX}clear":
+            sid = f"dc_{message.author.id}"
+            memory_delete(sid)
+            await message.channel.send("🗑️ ล้างประวัติการสนทนาแล้ว")
+            return
+
+        # ── prefix command: !help ──
+        if content == f"{DISCORD_PREFIX}help":
+            await message.channel.send(
+                f"**AI Agent Commands**\n"
+                f"`{DISCORD_PREFIX}clear` — ล้างประวัติการสนทนา\n"
+                f"`{DISCORD_PREFIX}help`  — แสดงคำสั่ง\n"
+                f"หรือพิมพ์ข้อความหา bot ได้โดยตรงในช่องนี้"
+            )
+            return
+
+        # ── ignore messages that don't start with prefix (in servers) ──
+        # In DMs, always respond. In guilds, require prefix or mention
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        is_mentioned = client.user in message.mentions
+        has_prefix = content.startswith(DISCORD_PREFIX)
+
+        if not is_dm and not is_mentioned and not has_prefix:
+            return
+
+        # Strip prefix/mention from text
+        user_text = content
+        if has_prefix:
+            user_text = content[len(DISCORD_PREFIX):].strip()
+        if is_mentioned:
+            user_text = user_text.replace(f"<@{client.user.id}>", "").strip()
+
+        if not user_text:
+            return
+
+        sid = f"dc_{message.author.id}"
+        async with message.channel.typing():
+            try:
+                reply = build_reply(user_text, sid)
+            except Exception as e:
+                reply = f"❌ Error: {e}"
+
+        # Discord limit: 2000 chars
+        for chunk in split_message(reply, 1900):
+            await message.channel.send(chunk)
+
+    def dc_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(client.start(DISCORD_TOKEN))
+
+    threading.Thread(target=dc_thread, daemon=True).start()
+
+# ─────────────────────────────────────────
 # Entrypoint
 # ─────────────────────────────────────────
 if __name__ == "__main__":
@@ -672,5 +849,9 @@ if __name__ == "__main__":
     print(f"   User      : {whoami}")
     print(f"   Auth      : {'✅ Password set' if ADMIN_PASSWORD != 'changeme' else '⚠️  Using default password!'}")
     print(f"   Supabase  : {'✅ Connected' if SUPABASE_URL else '❌ Not configured'}")
+    print(f"   Telegram  : {'✅ Token set' if TELEGRAM_TOKEN else '❌ Not configured'}")
+    print(f"   Discord   : {'✅ Token set' if DISCORD_TOKEN else '❌ Not configured'}")
     print(f"   Tools     : {', '.join(t['function']['name'] for t in TOOLS)}")
+    run_telegram_bot()
+    run_discord_bot()
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
