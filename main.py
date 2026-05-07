@@ -60,6 +60,12 @@ You are NBOT, a powerful autonomous AI assistant with advanced reasoning and too
 
 You can assist with programming, automation, research, Linux systems, APIs, cybersecurity learning, debugging, and technical tasks.
 
+Language Rules:
+- ALWAYS reply in the same language the user is using.
+- If the user writes in Thai, reply in Thai.
+- If the user writes in English, reply in English.
+- If the user writes in Lao, reply in Lao.
+
 Behavior Rules:
 - Prioritize the user's intent.
 - Respond clearly and directly.
@@ -67,9 +73,10 @@ Behavior Rules:
 - Avoid roleplay prefixes like "NBOT:".
 - Keep responses concise and informative.
 - Think step-by-step when solving technical problems.
-- Use available tools efficiently when needed.
+- Only use tools when truly necessary (e.g., user asks to search, run code, or access files).
+- For simple conversational questions, answer directly WITHOUT using any tools.
 - Maintain a calm and professional tone.
-- Respond concisely. Do not include internal reasoning.
+- Do not include internal reasoning in your response.
 
 You are designed to be adaptive, efficient, and highly capable.
 """
@@ -178,7 +185,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "max_results": {"type": "integer", "description": "Max results (default 5)", "default": 5},
+                    "max_results": {"type": "integer", "description": "Max results to return (1-10)"},
                 },
                 "required": ["query"],
             },
@@ -193,7 +200,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path to read"},
-                    "max_chars": {"type": "integer", "description": "Max chars to return (default 8000)", "default": 8000},
+                    "max_chars": {"type": "integer", "description": "Max chars to return"},
                 },
                 "required": ["path"],
             },
@@ -209,7 +216,7 @@ TOOLS = [
                 "properties": {
                     "path": {"type": "string", "description": "File path to write"},
                     "content": {"type": "string", "description": "Content to write"},
-                    "mode": {"type": "string", "description": "'w' overwrite (default) or 'a' append", "default": "w"},
+                    "mode": {"type": "string", "description": "'w' to overwrite or 'a' to append"},
                 },
                 "required": ["path", "content"],
             },
@@ -224,10 +231,10 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "url":     {"type": "string", "description": "Target URL"},
-                    "method":  {"type": "string", "description": "HTTP method (default GET)", "default": "GET"},
+                    "method":  {"type": "string", "description": "HTTP method: GET, POST, PUT, DELETE"},
                     "headers": {"type": "object", "description": "Request headers"},
                     "body":    {"type": "string", "description": "Request body (for POST/PUT)"},
-                    "timeout": {"type": "integer", "description": "Timeout seconds (default 30)", "default": 30},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds"},
                 },
                 "required": ["url"],
             },
@@ -330,7 +337,7 @@ def dispatch_tool(name: str, args: dict) -> str:
     if name == "shell":
         return format_shell_result(run_shell(args.get("command", "")))
     elif name == "web_search":
-        return run_web_search(args.get("query", ""), args.get("max_results", 5))
+        return run_web_search(args.get("query", ""), int(args.get("max_results", 5)))
     elif name == "read_file":
         return run_read_file(args.get("path", ""), args.get("max_chars", 8000))
     elif name == "write_file":
@@ -354,7 +361,7 @@ def call_hf_raw(messages: list) -> dict:
             GROQ_API_URL,
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
             json={"model": MODEL_ID, "messages": messages, "max_tokens": MAX_TOKENS,
-                  "temperature": 0.7, "stream": False, "tools": TOOLS, "tool_choice": "auto"},
+                  "temperature": 0.6, "stream": False, "tools": TOOLS, "tool_choice": "auto"},
             timeout=120,
         )
         resp.raise_for_status()
