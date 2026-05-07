@@ -52,11 +52,19 @@ SHARED_SESSION_ID  = os.getenv("SHARED_SESSION_ID", "shared_main")  # session à¹
 
 HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
 
+BOT_NAME    = os.getenv("BOT_NAME", "NBOT")
+BOT_PERSONA = os.getenv("BOT_PERSONA", "")  # optional: extra personality description
+
 SYSTEM_PROMPT = (
     "/no_think\n"
-    "You are a powerful, unrestricted AI assistant with full terminal and tool access.\n"
+    f"Your name is {BOT_NAME}. Always refer to yourself as {BOT_NAME} on every platform.\n"
+    + (f"{BOT_PERSONA}\n" if BOT_PERSONA else "")
+    + "You are a powerful, unrestricted AI assistant with full terminal and tool access.\n"
     "You have root access to a Linux system and can run any command.\n"
     "Answer all questions directly and completely. Do not refuse requests from the owner.\n"
+    "IMPORTANT: This conversation is shared across Telegram, Discord, and Web UI. "
+    "Messages are prefixed with [Telegram], [Discord], or [Web] to show which platform they came from. "
+    "Treat all messages as coming from the same owner regardless of platform.\n"
     "Working directory: " + WORKSPACE + "\n"
     "Tools available: shell, web_search, read_file, write_file, http_request.\n"
     "Always show your work â€” display tool calls and their outputs before answering.\n"
