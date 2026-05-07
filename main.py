@@ -369,9 +369,14 @@ def call_hf_raw(messages: list) -> dict:
     except requests.exceptions.Timeout:
         return {"error": "⏱️ Request timed out."}
     except requests.exceptions.HTTPError:
-        code = resp.status_code
+        try:
+            code = resp.status_code
+            body = resp.text[:300]
+        except Exception:
+            code = 0
+            body = "(no response body)"
         errors = {503: "🔄 Service unavailable", 429: "⚠️ Rate limit", 401: "🔑 Invalid GROQ_API_KEY"}
-        return {"error": errors.get(code, f"❌ API error {code}: {resp.text[:200]}")}
+        return {"error": errors.get(code, f"❌ API error {code}: {body}")}
     except Exception as e:
         return {"error": f"❌ {e}"}
 
@@ -391,7 +396,21 @@ def agent_loop(messages: list):
             messages.append(msg)
             for tc in tool_calls:
                 fn_name = tc["function"]["name"]
-                fn_args = json.loads(tc["function"]["arguments"])
+                raw_args = tc["function"].get("arguments", "{}")
+                try:
+                    fn_args = json.loads(raw_args) if raw_args else {}
+                except (json.JSONDecodeError, ValueError) as e:
+                    fn_args = {}
+                    result = f"❌ Tool call failed: malformed arguments — {e}\nRaw: {raw_args[:200]}"
+                    steps.append(("tool_call", fn_name, raw_args))
+                    steps.append(("tool_result", fn_name, result))
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": fn_name,
+                        "content": result,
+                    })
+                    continue
                 steps.append(("tool_call", fn_name, fn_args))
                 result = dispatch_tool(fn_name, fn_args)
                 steps.append(("tool_result", fn_name, result))
