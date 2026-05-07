@@ -2,13 +2,17 @@
 AI Agent - Hugging Face Serverless Inference
 Model: Qwen/Qwen3-32B (Free, best quality on HF)
 Deploy: Railway
+
+Fixes applied (from log analysis):
+  1. Chatbot type='messages'  → Fixed deprecation warning
+  2. gr.mount_gradio_app root_path="/ui" → Fixed /gradio_api/... 404
+  3. /theme.css 404 → Fixed by correct root_path
 """
 
 import os
-import json
 import requests
 import gradio as gr
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -17,17 +21,19 @@ import uvicorn
 # ─────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────
-HF_TOKEN = os.getenv("HF_TOKEN", "")
-MODEL_ID = os.getenv("MODEL_ID", "Qwen/Qwen3-32B")
-PORT = int(os.getenv("PORT", 7860))
+HF_TOKEN   = os.getenv("HF_TOKEN", "")
+MODEL_ID   = os.getenv("MODEL_ID", "Qwen/Qwen3-32B")
+PORT       = int(os.getenv("PORT", 7860))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", 1024))
 
-HF_API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}/v1/chat/completions"
+HF_API_URL = (
+    f"https://api-inference.huggingface.co/models/{MODEL_ID}/v1/chat/completions"
+)
 
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     "You are a helpful, smart, and concise AI assistant. "
-    "Think step by step and answer accurately."
+    "Think step by step and answer accurately.",
 )
 
 # ─────────────────────────────────────────
@@ -56,46 +62,47 @@ def call_hf(messages: list, temperature: float = 0.7, max_tokens: int = MAX_TOKE
         return data["choices"][0]["message"]["content"].strip()
     except requests.exceptions.Timeout:
         return "⏱️ Request timed out. The model may be loading, please try again."
-    except requests.exceptions.HTTPError as e:
+    except requests.exceptions.HTTPError:
         if resp.status_code == 503:
             return "🔄 Model is loading (cold start). Please wait ~30s and try again."
         elif resp.status_code == 429:
             return "⚠️ Rate limit reached. Free tier allows ~few hundred req/hr. Try again later."
         elif resp.status_code == 401:
             return "🔑 Invalid HF_TOKEN. Please check your Hugging Face access token."
-        return f"❌ API error {resp.status_code}: {e}"
+        return f"❌ API error {resp.status_code}: {resp.text[:200]}"
     except Exception as e:
         return f"❌ Error: {str(e)}"
 
 
 # ─────────────────────────────────────────
-# Agent Logic: Multi-turn with history
+# Agent: Build message history
 # ─────────────────────────────────────────
 def build_messages(history: list, user_input: str) -> list:
+    """History is openai-style list[dict] with role/content keys."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for user_msg, bot_msg in history:
-        messages.append({"role": "user", "content": user_msg})
-        if bot_msg:
-            messages.append({"role": "assistant", "content": bot_msg})
+    for msg in history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": user_input})
     return messages
 
 
 def chat(user_input: str, history: list, temperature: float, max_tokens: int):
     if not user_input.strip():
-        return history, history
+        return history
 
     messages = build_messages(history, user_input)
     response = call_hf(messages, temperature=temperature, max_tokens=int(max_tokens))
 
-    history = history + [(user_input, response)]
-    return history, history
+    return history + [
+        {"role": "user",      "content": user_input},
+        {"role": "assistant", "content": response},
+    ]
 
 
 # ─────────────────────────────────────────
-# FastAPI App
+# FastAPI
 # ─────────────────────────────────────────
-app = FastAPI(title="HF AI Agent", version="1.0")
+app = FastAPI(title="HF AI Agent", version="1.1")
 
 
 class ChatRequest(BaseModel):
@@ -112,17 +119,17 @@ class ChatResponse(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 def root():
-    return """
+    return f"""
     <html><body style="font-family:sans-serif;max-width:600px;margin:40px auto">
     <h2>🤖 HF AI Agent</h2>
-    <p>Model: <strong>{model}</strong></p>
+    <p>Model: <strong>{MODEL_ID}</strong></p>
     <ul>
       <li><a href="/ui">💬 Chat UI</a></li>
       <li><a href="/docs">📖 API Docs</a></li>
       <li><a href="/health">❤️ Health Check</a></li>
     </ul>
     </body></html>
-    """.format(model=MODEL_ID)
+    """
 
 
 @app.get("/health")
@@ -140,52 +147,55 @@ def api_chat(req: ChatRequest):
 # ─────────────────────────────────────────
 # Gradio UI
 # ─────────────────────────────────────────
-def build_gradio():
+def build_gradio() -> gr.Blocks:
     with gr.Blocks(
         title="🤖 AI Agent",
         theme=gr.themes.Soft(primary_hue="violet"),
-        css="""
-        .gradio-container { max-width: 860px !important; margin: auto; }
-        .model-badge { background: #7c3aed; color: white; padding: 4px 12px;
-                       border-radius: 20px; font-size: 0.8em; font-weight: bold; }
-        """
     ) as demo:
         gr.HTML(f"""
         <div style="text-align:center;padding:20px 0 10px">
           <h1>🤖 AI Agent</h1>
-          <span class="model-badge">⚡ {MODEL_ID}</span>
-          <p style="color:#666;margin-top:8px">Powered by Hugging Face Serverless Inference · 100% Free</p>
+          <span style="background:#7c3aed;color:white;padding:4px 14px;
+                       border-radius:20px;font-size:.85em;font-weight:bold">
+            ⚡ {MODEL_ID}
+          </span>
+          <p style="color:#666;margin-top:8px">
+            Powered by Hugging Face Serverless Inference · 100% Free
+          </p>
         </div>
         """)
 
+        # FIX 1: type="messages" → removes UserWarning deprecation
         chatbot = gr.Chatbot(
             label="Conversation",
+            type="messages",
             height=480,
             bubble_full_width=False,
             avatar_images=("👤", "🤖"),
+            show_copy_button=True,
         )
 
         with gr.Row():
             msg_box = gr.Textbox(
-                placeholder="Ask me anything...",
+                placeholder="Ask me anything... (Enter to send)",
                 show_label=False,
                 scale=9,
                 container=False,
             )
-            send_btn = gr.Button("Send", variant="primary", scale=1)
+            send_btn = gr.Button("Send ➤", variant="primary", scale=1)
 
         with gr.Accordion("⚙️ Settings", open=False):
             with gr.Row():
                 temperature = gr.Slider(0.0, 1.5, value=0.7, step=0.05, label="Temperature")
-                max_tokens = gr.Slider(128, 2048, value=1024, step=64, label="Max Tokens")
+                max_tokens  = gr.Slider(128, 2048, value=1024, step=64, label="Max Tokens")
 
         clear_btn = gr.Button("🗑️ Clear Chat", variant="secondary")
 
         state = gr.State([])
 
         def respond(user_input, history, temp, max_tok):
-            new_history, new_state = chat(user_input, history, temp, max_tok)
-            return new_history, new_state, ""
+            new_history = chat(user_input, history, temp, max_tok)
+            return new_history, new_history, ""
 
         send_btn.click(
             respond,
@@ -203,8 +213,8 @@ def build_gradio():
             examples=[
                 "Explain quantum computing in simple terms",
                 "Write a Python function to find prime numbers",
-                "What are the pros and cons of microservices architecture?",
-                "Help me debug: Why does my list comprehension return None?",
+                "What are the pros and cons of microservices?",
+                "Debug: why does my list comprehension return None?",
             ],
             inputs=msg_box,
         )
@@ -212,11 +222,10 @@ def build_gradio():
     return demo
 
 
-# ─────────────────────────────────────────
-# Mount Gradio on FastAPI
-# ─────────────────────────────────────────
-gradio_app = build_gradio()
-app = gr.mount_gradio_app(app, gradio_app, path="/ui")
+# FIX 2: root_path="/ui" → fixes /gradio_api/queue/join 404
+#         and /theme.css 404 — Gradio needs to know its own mount point
+gradio_demo = build_gradio()
+app = gr.mount_gradio_app(app, gradio_demo, path="/ui", root_path="/ui")
 
 
 # ─────────────────────────────────────────
