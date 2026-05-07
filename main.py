@@ -636,7 +636,7 @@ def build_gradio():
 
 
 gradio_app = build_gradio()
-app = gr.mount_gradio_app(app, gradio_app, path="/ui")
+app = gr.mount_gradio_app(app, gradio_app, path="/ui", root_path="/ui")
 
 
 # ─────────────────────────────────────────
