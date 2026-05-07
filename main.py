@@ -3,7 +3,7 @@ AI Agent v6
 - Auth: ADMIN_PASSWORD (session cookie)
 - Supabase: memory/conversation persistence
 - Tools: shell, web_search, read_file, write_file, http_request
-- Model: Qwen/Qwen3-32B via HuggingFace
+- Model: llama-3.3-70b-versatile via Groq
 """
 
 import os, re, json, subprocess, requests, secrets, hashlib, threading, asyncio
@@ -34,8 +34,8 @@ except ImportError:
 # ─────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────
-HF_TOKEN       = os.getenv("HF_TOKEN", "")
-MODEL_ID       = os.getenv("MODEL_ID", "Qwen/Qwen3-32B")
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
+MODEL_ID       = os.getenv("MODEL_ID", "llama-3.3-70b-versatile")
 PORT           = int(os.getenv("PORT", 7860))
 MAX_TOKENS     = int(os.getenv("MAX_TOKENS", 4096))
 SHELL_TIMEOUT  = int(os.getenv("SHELL_TIMEOUT", "30"))
@@ -50,14 +50,12 @@ DISCORD_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")
 DISCORD_PREFIX     = os.getenv("DISCORD_PREFIX", "!")
 SHARED_SESSION_ID  = os.getenv("SHARED_SESSION_ID", "shared_main")  # session เดียวกันทุก platform
 
-HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 BOT_NAME    = os.getenv("BOT_NAME", "NBOT")
 BOT_PERSONA = os.getenv("BOT_PERSONA", "")  # optional: extra personality description
 
 SYSTEM_PROMPT = """
-/no_think
-
 You are NBOT, a powerful autonomous AI assistant with advanced reasoning and tool usage capabilities.
 
 You can assist with programming, automation, research, Linux systems, APIs, cybersecurity learning, debugging, and technical tasks.
@@ -349,12 +347,12 @@ def strip_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
 
 def call_hf_raw(messages: list) -> dict:
-    if not HF_TOKEN:
-        return {"error": "HF_TOKEN not set"}
+    if not GROQ_API_KEY:
+        return {"error": "GROQ_API_KEY not set"}
     try:
         resp = requests.post(
-            HF_API_URL,
-            headers={"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"},
+            GROQ_API_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
             json={"model": MODEL_ID, "messages": messages, "max_tokens": MAX_TOKENS,
                   "temperature": 0.7, "stream": False, "tools": TOOLS, "tool_choice": "auto"},
             timeout=120,
@@ -365,7 +363,7 @@ def call_hf_raw(messages: list) -> dict:
         return {"error": "⏱️ Request timed out."}
     except requests.exceptions.HTTPError:
         code = resp.status_code
-        errors = {503: "🔄 Model loading (~30s)", 429: "⚠️ Rate limit", 401: "🔑 Invalid HF_TOKEN"}
+        errors = {503: "🔄 Service unavailable", 429: "⚠️ Rate limit", 401: "🔑 Invalid GROQ_API_KEY"}
         return {"error": errors.get(code, f"❌ API error {code}: {resp.text[:200]}")}
     except Exception as e:
         return {"error": f"❌ {e}"}
@@ -465,7 +463,7 @@ def root(request: Request):
 def health():
     return {
         "status": "ok", "model": MODEL_ID, "version": "6.0",
-        "hf_token": bool(HF_TOKEN), "supabase": bool(SUPABASE_URL),
+        "groq_api_key": bool(GROQ_API_KEY), "supabase": bool(SUPABASE_URL),
         "tools": [t["function"]["name"] for t in TOOLS],
         "whoami": subprocess.getoutput("whoami"),
     }
@@ -653,7 +651,7 @@ def build_gradio():
         gr.Examples(
             examples=[
                 "ดู disk usage และ memory ปัจจุบัน",
-                "ค้นหาข้อมูลเรื่อง Qwen3 32B จากเว็บ",
+                "ค้นหาข้อมูลเรื่อง LLaMA 3.3 จากเว็บ",
                 "สร้างไฟล์ test.py เขียน fibonacci แล้วรัน",
                 "GET https://httpbin.org/get",
                 "ดู process ที่กำลังรัน และ port ที่เปิดอยู่",
@@ -870,6 +868,7 @@ if __name__ == "__main__":
     print(f"   Port      : {PORT}")
     print(f"   User      : {whoami}")
     print(f"   Auth      : {'✅ Password set' if ADMIN_PASSWORD != 'changeme' else '⚠️  Using default password!'}")
+    print(f"   Groq API  : {'✅ Key set' if GROQ_API_KEY else '❌ GROQ_API_KEY not set'}")
     print(f"   Supabase  : {'✅ Connected' if SUPABASE_URL else '❌ Not configured'}")
     print(f"   Telegram  : {'✅ Token set' if TELEGRAM_TOKEN else '❌ Not configured'}")
     print(f"   Discord   : {'✅ Token set' if DISCORD_TOKEN else '❌ Not configured'}")
