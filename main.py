@@ -1,12 +1,12 @@
 """
-AI Agent - Hugging Face Serverless Inference
+AI Agent - Hugging Face Inference Providers
 Model: Qwen/Qwen3-32B (Free, best quality on HF)
 Deploy: Railway
 
-Fixes applied:
-  v1: type='messages', root_path='/ui'         → fixed /gradio_api 404
-  v2: remove avatar_images emoji strings       → fixed /gradio_api/file= 403
-      font 404 is browser system-font fallback → harmless, no fix needed
+Fixes:
+  v1: type='messages', root_path='/ui'     → fixed /gradio_api 404
+  v2: avatar_images=(None,None)            → fixed /gradio_api/file= 403
+  v3: endpoint → router.huggingface.co/v1 → fixed "Cannot POST /models/..." 404
 """
 
 import os
@@ -26,9 +26,9 @@ MODEL_ID   = os.getenv("MODEL_ID", "Qwen/Qwen3-32B")
 PORT       = int(os.getenv("PORT", 7860))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", 1024))
 
-HF_API_URL = (
-    f"https://api-inference.huggingface.co/models/{MODEL_ID}/v1/chat/completions"
-)
+# FIX v3: ใช้ router.huggingface.co — Inference Providers endpoint ใหม่
+# endpoint เดิม api-inference.huggingface.co/models/{model}/v1/... → 404 แล้ว
+HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
 
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
@@ -37,7 +37,7 @@ SYSTEM_PROMPT = os.getenv(
 )
 
 # ─────────────────────────────────────────
-# Core: Call HuggingFace API
+# Core: Call HuggingFace Inference Providers API
 # ─────────────────────────────────────────
 def call_hf(messages: list, temperature: float = 0.7, max_tokens: int = MAX_TOKENS) -> str:
     if not HF_TOKEN:
@@ -48,7 +48,7 @@ def call_hf(messages: list, temperature: float = 0.7, max_tokens: int = MAX_TOKE
         "Content-Type": "application/json",
     }
     payload = {
-        "model": MODEL_ID,
+        "model": MODEL_ID,       # router ใช้ model field เพื่อ route ไปยัง provider ที่เร็วที่สุด
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -63,13 +63,17 @@ def call_hf(messages: list, temperature: float = 0.7, max_tokens: int = MAX_TOKE
     except requests.exceptions.Timeout:
         return "⏱️ Request timed out. The model may be loading, please try again."
     except requests.exceptions.HTTPError:
-        if resp.status_code == 503:
+        code = resp.status_code
+        body = resp.text[:300]
+        if code == 503:
             return "🔄 Model is loading (cold start). Please wait ~30s and try again."
-        elif resp.status_code == 429:
-            return "⚠️ Rate limit reached. Free tier allows ~few hundred req/hr. Try again later."
-        elif resp.status_code == 401:
-            return "🔑 Invalid HF_TOKEN. Please check your Hugging Face access token."
-        return f"❌ API error {resp.status_code}: {resp.text[:200]}"
+        elif code == 429:
+            return "⚠️ Rate limit reached. Free tier: ~few hundred req/hr. Try again later."
+        elif code == 401:
+            return "🔑 Invalid HF_TOKEN. Check your Hugging Face access token."
+        elif code == 422:
+            return f"⚙️ Model may not support this parameter format.\nDetail: {body}"
+        return f"❌ API error {code}: {body}"
     except Exception as e:
         return f"❌ Error: {str(e)}"
 
@@ -78,7 +82,6 @@ def call_hf(messages: list, temperature: float = 0.7, max_tokens: int = MAX_TOKE
 # Agent: Build message history
 # ─────────────────────────────────────────
 def build_messages(history: list, user_input: str) -> list:
-    """History is openai-style list[dict] with role/content keys."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["content"]})
@@ -89,10 +92,8 @@ def build_messages(history: list, user_input: str) -> list:
 def chat(user_input: str, history: list, temperature: float, max_tokens: int):
     if not user_input.strip():
         return history
-
     messages = build_messages(history, user_input)
     response = call_hf(messages, temperature=temperature, max_tokens=int(max_tokens))
-
     return history + [
         {"role": "user",      "content": user_input},
         {"role": "assistant", "content": response},
@@ -102,7 +103,7 @@ def chat(user_input: str, history: list, temperature: float, max_tokens: int):
 # ─────────────────────────────────────────
 # FastAPI
 # ─────────────────────────────────────────
-app = FastAPI(title="HF AI Agent", version="1.2")
+app = FastAPI(title="HF AI Agent", version="1.3")
 
 
 class ChatRequest(BaseModel):
@@ -123,6 +124,7 @@ def root():
     <html><body style="font-family:sans-serif;max-width:600px;margin:40px auto">
     <h2>🤖 HF AI Agent</h2>
     <p>Model: <strong>{MODEL_ID}</strong></p>
+    <p>Endpoint: <code>router.huggingface.co/v1</code></p>
     <ul>
       <li><a href="/ui">💬 Chat UI</a></li>
       <li><a href="/docs">📖 API Docs</a></li>
@@ -134,7 +136,12 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": MODEL_ID, "hf_token_set": bool(HF_TOKEN)}
+    return {
+        "status": "ok",
+        "model": MODEL_ID,
+        "endpoint": HF_API_URL,
+        "hf_token_set": bool(HF_TOKEN),
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -160,7 +167,7 @@ def build_gradio() -> gr.Blocks:
             ⚡ {MODEL_ID}
           </span>
           <p style="color:#666;margin-top:8px">
-            Powered by Hugging Face Serverless Inference · 100% Free
+            Powered by Hugging Face Inference Providers · 100% Free
           </p>
         </div>
         """)
@@ -170,9 +177,6 @@ def build_gradio() -> gr.Blocks:
             type="messages",
             height=480,
             bubble_full_width=False,
-            # FIX: ลบ avatar_images ออก — emoji ไม่ใช่ file path
-            # Gradio พยายาม serve "👤"/"🤖" เป็นไฟล์ → 403 Forbidden
-            # ใช้ None แทน (ไม่แสดง avatar ก็ได้ UI ปกติ)
             avatar_images=(None, None),
             show_copy_button=True,
         )
@@ -192,23 +196,14 @@ def build_gradio() -> gr.Blocks:
                 max_tokens  = gr.Slider(128, 2048, value=1024, step=64, label="Max Tokens")
 
         clear_btn = gr.Button("🗑️ Clear Chat", variant="secondary")
-
         state = gr.State([])
 
         def respond(user_input, history, temp, max_tok):
             new_history = chat(user_input, history, temp, max_tok)
             return new_history, new_history, ""
 
-        send_btn.click(
-            respond,
-            inputs=[msg_box, state, temperature, max_tokens],
-            outputs=[chatbot, state, msg_box],
-        )
-        msg_box.submit(
-            respond,
-            inputs=[msg_box, state, temperature, max_tokens],
-            outputs=[chatbot, state, msg_box],
-        )
+        send_btn.click(respond, [msg_box, state, temperature, max_tokens], [chatbot, state, msg_box])
+        msg_box.submit(respond, [msg_box, state, temperature, max_tokens], [chatbot, state, msg_box])
         clear_btn.click(lambda: ([], [], ""), outputs=[chatbot, state, msg_box])
 
         gr.Examples(
@@ -224,7 +219,6 @@ def build_gradio() -> gr.Blocks:
     return demo
 
 
-# root_path="/ui" → fixes /gradio_api/* routing under FastAPI mount
 gradio_demo = build_gradio()
 app = gr.mount_gradio_app(app, gradio_demo, path="/ui", root_path="/ui")
 
@@ -233,8 +227,9 @@ app = gr.mount_gradio_app(app, gradio_demo, path="/ui", root_path="/ui")
 # Entrypoint
 # ─────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"🚀 Starting AI Agent")
-    print(f"   Model : {MODEL_ID}")
-    print(f"   Port  : {PORT}")
-    print(f"   Token : {'✅ Set' if HF_TOKEN else '❌ Missing!'}")
+    print(f"🚀 Starting AI Agent v1.3")
+    print(f"   Model    : {MODEL_ID}")
+    print(f"   Endpoint : {HF_API_URL}")
+    print(f"   Port     : {PORT}")
+    print(f"   Token    : {'✅ Set' if HF_TOKEN else '❌ Missing!'}")
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
