@@ -353,17 +353,39 @@ def dispatch_tool(name: str, args: dict) -> str:
 def strip_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
 
+def _post_groq(messages: list, use_tools: bool = True) -> requests.Response:
+    payload = {
+        "model": MODEL_ID,
+        "messages": messages,
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.6,
+        "stream": False,
+    }
+    if use_tools:
+        payload["tools"] = TOOLS
+        payload["tool_choice"] = "auto"
+    return requests.post(
+        GROQ_API_URL,
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=120,
+    )
+
 def call_hf_raw(messages: list) -> dict:
     if not GROQ_API_KEY:
         return {"error": "GROQ_API_KEY not set"}
     try:
-        resp = requests.post(
-            GROQ_API_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": MODEL_ID, "messages": messages, "max_tokens": MAX_TOKENS,
-                  "temperature": 0.6, "stream": False, "tools": TOOLS, "tool_choice": "auto"},
-            timeout=120,
-        )
+        resp = _post_groq(messages, use_tools=True)
+        # If model generated a bad tool call (400 tool_use_failed), retry without tools
+        if resp.status_code == 400:
+            try:
+                err_body = resp.json()
+                code = err_body.get("error", {}).get("code", "")
+            except Exception:
+                code = ""
+            if code == "tool_use_failed":
+                print("[Groq] tool_use_failed — retrying without tools")
+                resp = _post_groq(messages, use_tools=False)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.Timeout:
