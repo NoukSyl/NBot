@@ -1,12 +1,17 @@
 """
 JARVIS Agent - Autonomous AI Agent
+Phase 1: Core + Admin System + Telegram Bot
 """
 
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 
-from aiohttp import web
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+import uvicorn
+
 from core.agent import JarvisAgent
 
 logging.basicConfig(
@@ -14,42 +19,28 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 
-# ----------------------------
-# Healthcheck server
-# ----------------------------
+agent = JarvisAgent()
 
-async def health(request):
-    return web.json_response({"status": "ok"})
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", health)
-    app.router.add_get("/health", health)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start agent in background when server starts
+    task = asyncio.create_task(agent.start())
+    yield
+    # Shutdown
+    await agent.stop()
+    task.cancel()
 
-    runner = web.AppRunner(app)
-    await runner.setup()
 
-    port = int(os.environ.get("PORT", 8080))
+app = FastAPI(lifespan=lifespan)
 
-    site = web.TCPSite(
-        runner,
-        host="0.0.0.0",
-        port=port
-    )
 
-    await site.start()
+@app.get("/health")
+async def health():
+    status = agent.get_status()
+    return JSONResponse({"status": "ok", **status})
 
-    logging.info(f"Health server running on port {port}")
-
-# ----------------------------
-# Main
-# ----------------------------
-
-async def main():
-    await start_web_server()
-
-    agent = JarvisAgent()
-    await agent.start()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.environ.get("PORT", 7860))
+    uvicorn.run(app, host="0.0.0.0", port=port)
