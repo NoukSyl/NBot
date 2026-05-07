@@ -1,15 +1,20 @@
 """
-AI Agent - Hugging Face Inference Providers
-Model: Qwen/Qwen3-32B (Free, best quality on HF)
+AI Agent - HuggingFace Inference + Terminal/Root Access
+Model: Qwen/Qwen3-32B (Free)
 Deploy: Railway
 
-Fixes:
-  v1: type='messages', root_path='/ui'     → fixed /gradio_api 404
-  v2: avatar_images=(None,None)            → fixed /gradio_api/file= 403
-  v3: endpoint → router.huggingface.co/v1 → fixed "Cannot POST /models/..." 404
+v5: เพิ่ม Shell Tool — agent รัน terminal command ได้ผ่าน tool calling
+    - LLM คิดเอง → เลือก tool → รัน shell → เห็น output → ตอบ
+    - root access: Railway container รัน as root by default
+    - timeout 30s / output จำกัด 4000 chars ป้องกัน flood context
+    - working dir = /workspace (สร้างอัตโนมัติ)
+    - Gradio UI แสดง tool call + output แบบ step-by-step
 """
 
 import os
+import re
+import json
+import subprocess
 import requests
 import gradio as gr
 from fastapi import FastAPI
@@ -21,114 +26,239 @@ import uvicorn
 # ─────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────
-HF_TOKEN   = os.getenv("HF_TOKEN", "")
-MODEL_ID   = os.getenv("MODEL_ID", "Qwen/Qwen3-32B")
-PORT       = int(os.getenv("PORT", 7860))
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", 1024))
+HF_TOKEN    = os.getenv("HF_TOKEN", "")
+MODEL_ID    = os.getenv("MODEL_ID", "Qwen/Qwen3-32B")
+PORT        = int(os.getenv("PORT", 7860))
+MAX_TOKENS  = int(os.getenv("MAX_TOKENS", 4096))
+SHELL_TIMEOUT = int(os.getenv("SHELL_TIMEOUT", "30"))      # วินาที
+MAX_OUTPUT  = int(os.getenv("MAX_OUTPUT_CHARS", "4000"))   # ป้องกัน context flood
+WORKSPACE   = os.getenv("WORKSPACE", "/workspace")
 
-# FIX v3: ใช้ router.huggingface.co — Inference Providers endpoint ใหม่
-# endpoint เดิม api-inference.huggingface.co/models/{model}/v1/... → 404 แล้ว
-HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
+HF_API_URL  = "https://router.huggingface.co/v1/chat/completions"
 
-SYSTEM_PROMPT = os.getenv(
-    "SYSTEM_PROMPT",
-    "You are a helpful, smart, and concise AI assistant. "
-    "Think step by step and answer accurately.",
+SYSTEM_PROMPT = (
+    "/no_think\n"
+    "You are a powerful AI assistant with terminal access to a Linux system (root).\n"
+    "You can run shell commands using the `shell` tool to help users.\n"
+    "Always explain what you're doing before running commands.\n"
+    "Working directory: " + WORKSPACE + "\n"
+    "Be careful with destructive commands — ask for confirmation if unsure.\n"
+    "After running commands, explain the output clearly."
 )
 
+# สร้าง workspace
+os.makedirs(WORKSPACE, exist_ok=True)
+
 # ─────────────────────────────────────────
-# Core: Call HuggingFace Inference Providers API
+# Tool Definition — ส่งให้ LLM รู้จัก
 # ─────────────────────────────────────────
-def call_hf(messages: list, temperature: float = 0.7, max_tokens: int = MAX_TOKENS) -> str:
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": (
+                "Run a shell command on the Linux system as root. "
+                "Returns stdout, stderr, exit code, and whether it timed out. "
+                f"Timeout: {SHELL_TIMEOUT}s. Working dir: {WORKSPACE}"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute (bash)",
+                    }
+                },
+                "required": ["command"],
+            },
+        },
+    }
+]
+
+# ─────────────────────────────────────────
+# Shell Executor
+# ─────────────────────────────────────────
+def run_shell(command: str) -> dict:
+    """รัน shell command ใน subprocess พร้อม timeout และ output limit"""
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=WORKSPACE,
+            env={**os.environ, "HOME": "/root", "TERM": "xterm"},
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=SHELL_TIMEOUT)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            timed_out = True
+
+        # จำกัดขนาด output
+        def trim(s): return s[:MAX_OUTPUT] + "\n[...truncated]" if len(s) > MAX_OUTPUT else s
+
+        return {
+            "stdout":    trim(stdout),
+            "stderr":    trim(stderr),
+            "exit_code": proc.returncode,
+            "timed_out": timed_out,
+        }
+    except Exception as e:
+        return {"stdout": "", "stderr": str(e), "exit_code": -1, "timed_out": False}
+
+
+def format_shell_result(result: dict) -> str:
+    """แปลง shell result เป็น string ส่งกลับ LLM"""
+    parts = []
+    if result["timed_out"]:
+        parts.append(f"⚠️ TIMED OUT after {SHELL_TIMEOUT}s")
+    parts.append(f"Exit code: {result['exit_code']}")
+    if result["stdout"]:
+        parts.append(f"STDOUT:\n{result['stdout']}")
+    if result["stderr"]:
+        parts.append(f"STDERR:\n{result['stderr']}")
+    return "\n".join(parts) if parts else "(no output)"
+
+
+# ─────────────────────────────────────────
+# Helper: strip <think> block
+# ─────────────────────────────────────────
+def strip_thinking(text: str) -> str:
+    return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+
+
+# ─────────────────────────────────────────
+# Core: Call HF API (with tool calling loop)
+# ─────────────────────────────────────────
+def call_hf_raw(messages: list, use_tools: bool = True) -> dict:
+    """เรียก HF API ครั้งเดียว — return raw response dict"""
     if not HF_TOKEN:
-        return "❌ HF_TOKEN not set. Please add it in Railway environment variables."
+        return {"error": "HF_TOKEN not set"}
 
     headers = {
         "Authorization": f"Bearer {HF_TOKEN}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": MODEL_ID,       # router ใช้ model field เพื่อ route ไปยัง provider ที่เร็วที่สุด
+        "model": MODEL_ID,
         "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.7,
         "stream": False,
     }
+    if use_tools:
+        payload["tools"] = TOOLS
+        payload["tool_choice"] = "auto"
 
     try:
         resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
+        return resp.json()
     except requests.exceptions.Timeout:
-        return "⏱️ Request timed out. The model may be loading, please try again."
+        return {"error": "⏱️ Request timed out. Please try again."}
     except requests.exceptions.HTTPError:
         code = resp.status_code
         body = resp.text[:300]
-        if code == 503:
-            return "🔄 Model is loading (cold start). Please wait ~30s and try again."
-        elif code == 429:
-            return "⚠️ Rate limit reached. Free tier: ~few hundred req/hr. Try again later."
-        elif code == 401:
-            return "🔑 Invalid HF_TOKEN. Check your Hugging Face access token."
-        elif code == 422:
-            return f"⚙️ Model may not support this parameter format.\nDetail: {body}"
-        return f"❌ API error {code}: {body}"
+        errors = {
+            503: "🔄 Model loading. Wait ~30s and retry.",
+            429: "⚠️ Rate limit. Try again later.",
+            401: "🔑 Invalid HF_TOKEN.",
+        }
+        return {"error": errors.get(code, f"❌ API error {code}: {body}")}
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        return {"error": f"❌ {str(e)}"}
 
 
-# ─────────────────────────────────────────
-# Agent: Build message history
-# ─────────────────────────────────────────
-def build_messages(history: list, user_input: str) -> list:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for msg in history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
-    messages.append({"role": "user", "content": user_input})
-    return messages
+def agent_loop(messages: list, yield_steps=False):
+    """
+    Agentic loop: LLM → tool call? → run shell → ส่งผลกลับ → LLM ตอบ
+    yield_steps=True: yield (step_type, content) ระหว่างทาง
+    """
+    MAX_ROUNDS = 10
+    steps = []
 
+    for _ in range(MAX_ROUNDS):
+        data = call_hf_raw(messages, use_tools=True)
 
-def chat(user_input: str, history: list, temperature: float, max_tokens: int):
-    if not user_input.strip():
-        return history
-    messages = build_messages(history, user_input)
-    response = call_hf(messages, temperature=temperature, max_tokens=int(max_tokens))
-    return history + [
-        {"role": "user",      "content": user_input},
-        {"role": "assistant", "content": response},
-    ]
+        if "error" in data:
+            return data["error"], steps
+
+        choice = data["choices"][0]
+        msg = choice["message"]
+        finish = choice.get("finish_reason", "")
+
+        # มี tool call?
+        tool_calls = msg.get("tool_calls") or []
+
+        if tool_calls:
+            # เพิ่ม assistant message (ที่มี tool_calls) เข้า history
+            messages.append(msg)
+
+            for tc in tool_calls:
+                fn_name = tc["function"]["name"]
+                fn_args = json.loads(tc["function"]["arguments"])
+
+                if fn_name == "shell":
+                    cmd = fn_args.get("command", "")
+                    steps.append(("tool_call", cmd))
+
+                    result = run_shell(cmd)
+                    result_str = format_shell_result(result)
+                    steps.append(("tool_result", result_str))
+
+                    # ส่งผล tool กลับ LLM
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": fn_name,
+                        "content": result_str,
+                    })
+
+        else:
+            # ไม่มี tool call → LLM ตอบสุดท้ายแล้ว
+            final = strip_thinking(msg.get("content") or "")
+            return final, steps
+
+        if finish == "stop":
+            break
+
+    return "Agent reached max rounds without a final answer.", steps
 
 
 # ─────────────────────────────────────────
 # FastAPI
 # ─────────────────────────────────────────
-app = FastAPI(title="HF AI Agent", version="1.3")
+app = FastAPI(title="HF Shell Agent", version="1.5")
 
 
 class ChatRequest(BaseModel):
     message: str
     history: Optional[list] = []
     temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 1024
+    max_tokens: Optional[int] = 4096
 
 
 class ChatResponse(BaseModel):
     response: str
     model: str
+    steps: Optional[list] = []
 
 
 @app.get("/", response_class=HTMLResponse)
 def root():
     return f"""
     <html><body style="font-family:sans-serif;max-width:600px;margin:40px auto">
-    <h2>🤖 HF AI Agent</h2>
-    <p>Model: <strong>{MODEL_ID}</strong></p>
-    <p>Endpoint: <code>router.huggingface.co/v1</code></p>
+    <h2>🤖 HF Shell Agent</h2>
+    <p>Model: <strong>{MODEL_ID}</strong> · Root: ✅ · Workspace: <code>{WORKSPACE}</code></p>
     <ul>
       <li><a href="/ui">💬 Chat UI</a></li>
       <li><a href="/docs">📖 API Docs</a></li>
-      <li><a href="/health">❤️ Health Check</a></li>
+      <li><a href="/health">❤️ Health</a></li>
     </ul>
     </body></html>
     """
@@ -137,53 +267,58 @@ def root():
 @app.get("/health")
 def health():
     return {
-        "status": "ok",
-        "model": MODEL_ID,
-        "endpoint": HF_API_URL,
+        "status": "ok", "model": MODEL_ID,
         "hf_token_set": bool(HF_TOKEN),
+        "workspace": WORKSPACE,
+        "shell_timeout": SHELL_TIMEOUT,
+        "whoami": subprocess.getoutput("whoami"),
     }
 
 
 @app.post("/chat", response_model=ChatResponse)
 def api_chat(req: ChatRequest):
-    messages = build_messages(req.history or [], req.message)
-    response = call_hf(messages, temperature=req.temperature, max_tokens=req.max_tokens)
-    return ChatResponse(response=response, model=MODEL_ID)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for m in (req.history or []):
+        messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": req.message})
+
+    final, steps = agent_loop(messages)
+    return ChatResponse(response=final, model=MODEL_ID, steps=steps)
 
 
 # ─────────────────────────────────────────
 # Gradio UI
 # ─────────────────────────────────────────
 def build_gradio() -> gr.Blocks:
-    with gr.Blocks(
-        title="🤖 AI Agent",
-        theme=gr.themes.Soft(primary_hue="violet"),
-    ) as demo:
+    with gr.Blocks(title="🤖 Shell Agent", theme=gr.themes.Soft(primary_hue="violet")) as demo:
         gr.HTML(f"""
         <div style="text-align:center;padding:20px 0 10px">
-          <h1>🤖 AI Agent</h1>
+          <h1>🤖 Shell Agent</h1>
           <span style="background:#7c3aed;color:white;padding:4px 14px;
                        border-radius:20px;font-size:.85em;font-weight:bold">
             ⚡ {MODEL_ID}
           </span>
-          <p style="color:#666;margin-top:8px">
-            Powered by Hugging Face Inference Providers · 100% Free
-          </p>
+          <span style="background:#16a34a;color:white;padding:4px 10px;
+                       border-radius:20px;font-size:.85em;font-weight:bold;margin-left:6px">
+            🖥️ Terminal · Root Access
+          </span>
+          <p style="color:#666;margin-top:8px">Agent คิดเอง → รัน shell → ตอบ · Workspace: <code>{WORKSPACE}</code></p>
         </div>
         """)
 
         chatbot = gr.Chatbot(
             label="Conversation",
             type="messages",
-            height=480,
+            height=520,
             bubble_full_width=False,
             avatar_images=(None, None),
             show_copy_button=True,
+            render_markdown=True,
         )
 
         with gr.Row():
             msg_box = gr.Textbox(
-                placeholder="Ask me anything... (Enter to send)",
+                placeholder='ลองพิมพ์: "ดู disk usage" หรือ "เขียน hello world ด้วย Python แล้วรัน"',
                 show_label=False,
                 scale=9,
                 container=False,
@@ -192,15 +327,43 @@ def build_gradio() -> gr.Blocks:
 
         with gr.Accordion("⚙️ Settings", open=False):
             with gr.Row():
-                temperature = gr.Slider(0.0, 1.5, value=0.7, step=0.05, label="Temperature")
-                max_tokens  = gr.Slider(128, 2048, value=1024, step=64, label="Max Tokens")
+                temperature = gr.Slider(0.0, 1.0, value=0.7, step=0.05, label="Temperature")
+                max_tokens  = gr.Slider(256, 8192, value=4096, step=256, label="Max Tokens")
 
-        clear_btn = gr.Button("🗑️ Clear Chat", variant="secondary")
-        state = gr.State([])
+        clear_btn = gr.Button("🗑️ Clear", variant="secondary")
+        state = gr.State([])  # openai-style message list
 
-        def respond(user_input, history, temp, max_tok):
-            new_history = chat(user_input, history, temp, max_tok)
-            return new_history, new_history, ""
+        def respond(user_input, history_state, temp, max_tok):
+            if not user_input.strip():
+                return history_state, history_state, ""
+
+            # build messages
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            for m in history_state:
+                messages.append({"role": m["role"], "content": m["content"]})
+            messages.append({"role": "user", "content": user_input})
+
+            # run agent
+            final, steps = agent_loop(messages)
+
+            # สร้าง assistant message พร้อม tool steps ถ้ามี
+            assistant_content = ""
+            if steps:
+                tool_md = []
+                for kind, content in steps:
+                    if kind == "tool_call":
+                        tool_md.append(f"```bash\n$ {content}\n```")
+                    elif kind == "tool_result":
+                        tool_md.append(f"```\n{content}\n```")
+                assistant_content = "\n".join(tool_md) + "\n\n---\n" + final
+            else:
+                assistant_content = final
+
+            new_state = history_state + [
+                {"role": "user",      "content": user_input},
+                {"role": "assistant", "content": assistant_content},
+            ]
+            return new_state, new_state, ""
 
         send_btn.click(respond, [msg_box, state, temperature, max_tokens], [chatbot, state, msg_box])
         msg_box.submit(respond, [msg_box, state, temperature, max_tokens], [chatbot, state, msg_box])
@@ -208,10 +371,12 @@ def build_gradio() -> gr.Blocks:
 
         gr.Examples(
             examples=[
-                "Explain quantum computing in simple terms",
-                "Write a Python function to find prime numbers",
-                "What are the pros and cons of microservices?",
-                "Debug: why does my list comprehension return None?",
+                "ดูข้อมูล disk usage และ memory ปัจจุบัน",
+                "สร้างไฟล์ hello.py ที่พิมพ์ 'Hello from AI Agent!' แล้วรัน",
+                "ติดตั้ง cowsay แล้วให้มันพูดว่า I am an AI",
+                "หา IP address ของเครื่องนี้",
+                "รัน Python one-liner คำนวณ fibonacci 10 ตัวแรก",
+                "ดูว่า process อะไรกำลังรันอยู่บ้าง",
             ],
             inputs=msg_box,
         )
@@ -227,9 +392,13 @@ app = gr.mount_gradio_app(app, gradio_demo, path="/ui", root_path="/ui")
 # Entrypoint
 # ─────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"🚀 Starting AI Agent v1.3")
-    print(f"   Model    : {MODEL_ID}")
-    print(f"   Endpoint : {HF_API_URL}")
-    print(f"   Port     : {PORT}")
-    print(f"   Token    : {'✅ Set' if HF_TOKEN else '❌ Missing!'}")
+    import subprocess as sp
+    whoami = sp.getoutput("whoami")
+    print(f"🚀 Starting Shell Agent v1.5")
+    print(f"   Model     : {MODEL_ID}")
+    print(f"   Endpoint  : {HF_API_URL}")
+    print(f"   Port      : {PORT}")
+    print(f"   Workspace : {WORKSPACE}")
+    print(f"   User      : {whoami}  ({'✅ root' if whoami=='root' else '⚠️ not root'})")
+    print(f"   Token     : {'✅ Set' if HF_TOKEN else '❌ Missing!'}")
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
