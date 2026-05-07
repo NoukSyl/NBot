@@ -73,7 +73,8 @@ Behavior Rules:
 - Avoid roleplay prefixes like "NBOT:".
 - Keep responses concise and informative.
 - Think step-by-step when solving technical problems.
-- Only use tools when truly necessary (e.g., user asks to search, run code, or access files).
+- When the user asks to run a speedtest, use the shell tool with: `curl -s https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py | python3 -`
+- Always pass max_results as an integer (e.g. 5), never as a string.
 - For simple conversational questions, answer directly WITHOUT using any tools.
 - Maintain a calm and professional tone.
 - Do not include internal reasoning in your response.
@@ -185,7 +186,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "max_results": {"type": "integer", "description": "Max results to return (1-10)"},
+                    "max_results": {"type": "integer", "description": "Max results to return, must be an integer between 1 and 10. Default: 5", "default": 5},
                 },
                 "required": ["query"],
             },
@@ -374,33 +375,42 @@ def _post_groq(messages: list, use_tools: bool = True) -> requests.Response:
 def call_hf_raw(messages: list) -> dict:
     if not GROQ_API_KEY:
         return {"error": "GROQ_API_KEY not set"}
-    try:
-        resp = _post_groq(messages, use_tools=True)
-        # If model generated a bad tool call (400 tool_use_failed), retry without tools
-        if resp.status_code == 400:
-            try:
-                err_body = resp.json()
-                code = err_body.get("error", {}).get("code", "")
-            except Exception:
-                code = ""
-            if code == "tool_use_failed":
-                print("[Groq] tool_use_failed — retrying without tools")
-                resp = _post_groq(messages, use_tools=False)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.Timeout:
-        return {"error": "⏱️ Request timed out."}
-    except requests.exceptions.HTTPError:
+    import time
+    for attempt in range(3):
         try:
-            code = resp.status_code
-            body = resp.text[:300]
-        except Exception:
-            code = 0
-            body = "(no response body)"
-        errors = {503: "🔄 Service unavailable", 429: "⚠️ Rate limit", 401: "🔑 Invalid GROQ_API_KEY"}
-        return {"error": errors.get(code, f"❌ API error {code}: {body}")}
-    except Exception as e:
-        return {"error": f"❌ {e}"}
+            resp = _post_groq(messages, use_tools=True)
+            # If model generated a bad tool call (400 tool_use_failed), retry without tools
+            if resp.status_code == 400:
+                try:
+                    err_body = resp.json()
+                    code = err_body.get("error", {}).get("code", "")
+                except Exception:
+                    code = ""
+                if code == "tool_use_failed":
+                    print("[Groq] tool_use_failed — retrying without tools")
+                    resp = _post_groq(messages, use_tools=False)
+            # Rate limit — wait and retry
+            if resp.status_code == 429:
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                print(f"[Groq] 429 rate limit — waiting {wait}s (attempt {attempt+1}/3)")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.Timeout:
+            return {"error": "⏱️ Request timed out."}
+        except requests.exceptions.HTTPError:
+            try:
+                code = resp.status_code
+                body = resp.text[:300]
+            except Exception:
+                code = 0
+                body = "(no response body)"
+            errors = {503: "🔄 Service unavailable", 429: "⚠️ Rate limit — ลองใหม่อีกครั้งหลังจาก 1 นาที", 401: "🔑 Invalid GROQ_API_KEY"}
+            return {"error": errors.get(code, f"❌ API error {code}: {body}")}
+        except Exception as e:
+            return {"error": f"❌ {e}"}
+    return {"error": "⚠️ Rate limit — กรุณารอสักครู่แล้วลองใหม่"}
 
 def agent_loop(messages: list):
     MAX_ROUNDS = 15
