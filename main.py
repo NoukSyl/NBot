@@ -45,9 +45,10 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
 SUPABASE_URL   = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY   = os.getenv("SUPABASE_KEY", "")
 SESSION_TABLE  = os.getenv("SUPABASE_TABLE", "agent_memory")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-DISCORD_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
-DISCORD_PREFIX = os.getenv("DISCORD_PREFIX", "!")
+TELEGRAM_TOKEN     = os.getenv("TELEGRAM_BOT_TOKEN", "")
+DISCORD_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")
+DISCORD_PREFIX     = os.getenv("DISCORD_PREFIX", "!")
+SHARED_SESSION_ID  = os.getenv("SHARED_SESSION_ID", "shared_main")  # session เดียวกันทุก platform
 
 HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
 
@@ -538,13 +539,13 @@ def build_gradio():
 
         # ── Session selector ──
         with gr.Row():
-            session_id = gr.Textbox(value="default", label="Session ID", scale=3,
+            session_id = gr.Textbox(value=SHARED_SESSION_ID, label="🔗 Session ID (Shared)", scale=3,
                                      placeholder="ตั้งชื่อ session เช่น 'work', 'research'")
             load_btn   = gr.Button("📂 Load", scale=1, variant="secondary")
             new_btn    = gr.Button("➕ New", scale=1, variant="secondary")
             del_btn    = gr.Button("🗑️ Delete", scale=1, variant="stop")
 
-        session_info = gr.Markdown("", visible=True)
+        session_info = gr.Markdown(f"🔗 Session ร่วมกับ Telegram & Discord: **{SHARED_SESSION_ID}**", visible=True)
 
         chatbot = gr.Chatbot(
             label="Conversation", type="messages", height=500,
@@ -600,7 +601,7 @@ def build_gradio():
                 return history_state, history_state, "", ""
 
             messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history_state
-            messages.append({"role": "user", "content": user_input})
+            messages.append({"role": "user", "content": f"[Web] {user_input}"})
 
             final, steps = agent_loop(messages)
 
@@ -625,8 +626,8 @@ def build_gradio():
                 {"role": "assistant", "content": assistant_md},
             ]
 
-            # Save to supabase
-            memory_save(sid, new_state)
+            # Save to supabase (always use shared session)
+            memory_save(SHARED_SESSION_ID, new_state)
 
             info = f"💾 Auto-saved to session **{sid}**" if SUPABASE_URL else "⚠️ Supabase not configured"
             return new_state, new_state, "", info
@@ -696,17 +697,19 @@ def split_message(text: str, limit: int) -> list[str]:
         chunks.append(text)
     return chunks
 
-def build_reply(user_text: str, session_id: str = "tg_default") -> str:
-    """Shared agent call used by both Telegram and Discord."""
-    history = memory_load(session_id)
+def build_reply(user_text: str, platform: str = "unknown") -> str:
+    """Shared agent call — ทุก platform ใช้ SHARED_SESSION_ID เดียวกัน"""
+    sid = SHARED_SESSION_ID
+    history = memory_load(sid)
+    tagged_text = f"[{platform}] {user_text}"
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
-    messages.append({"role": "user", "content": user_text})
+    messages.append({"role": "user", "content": tagged_text})
     final, _ = agent_loop(messages)
     new_history = history + [
-        {"role": "user",      "content": user_text},
+        {"role": "user",      "content": tagged_text},
         {"role": "assistant", "content": final},
     ]
-    memory_save(session_id, new_history)
+    memory_save(sid, new_history)
     return final
 
 # ─────────────────────────────────────────
@@ -727,16 +730,15 @@ def run_telegram_bot():
         )
 
     async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        sid = f"tg_{update.effective_user.id}"
-        memory_delete(sid)
-        await update.message.reply_text("🗑️ ล้างประวัติการสนทนาแล้ว")
+        memory_delete(SHARED_SESSION_ID)
+        await update.message.reply_text(f"🗑️ ล้างประวัติ shared session ({SHARED_SESSION_ID}) แล้ว\n⚠️ Discord และ Web UI จะถูกล้างด้วย")
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text = update.message.text
         sid = f"tg_{update.effective_user.id}"
         await update.message.chat.send_action("typing")
         try:
-            reply = build_reply(user_text, sid)
+            reply = build_reply(user_text, "Telegram")
         except Exception as e:
             reply = f"❌ Error: {e}"
         # Telegram limit: 4096 chars
@@ -794,9 +796,8 @@ def run_discord_bot():
 
         # ── prefix command: !clear ──
         if content == f"{DISCORD_PREFIX}clear":
-            sid = f"dc_{message.author.id}"
-            memory_delete(sid)
-            await message.channel.send("🗑️ ล้างประวัติการสนทนาแล้ว")
+            memory_delete(SHARED_SESSION_ID)
+            await message.channel.send(f"🗑️ ล้างประวัติ shared session ({SHARED_SESSION_ID}) แล้ว\n⚠️ Telegram และ Web UI จะถูกล้างด้วย")
             return
 
         # ── prefix command: !help ──
@@ -831,7 +832,7 @@ def run_discord_bot():
         sid = f"dc_{message.author.id}"
         async with message.channel.typing():
             try:
-                reply = build_reply(user_text, sid)
+                reply = build_reply(user_text, "Discord")
             except Exception as e:
                 reply = f"❌ Error: {e}"
 
