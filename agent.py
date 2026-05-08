@@ -95,7 +95,7 @@ def run_agent(user_input: str, history: list) -> dict:
 
     # ตั้งค่าโมเดลเป็น Gemini 3.1 Flash (รุ่นล่าสุด)
     model = genai.GenerativeModel(
-        model_name='gemini-3.1-flash', 
+        model_name='gemini-flash-latest', 
         tools=[execute_command, write_file, read_file]
     )
 
