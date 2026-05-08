@@ -1,17 +1,8 @@
-import os
-import subprocess
-import logging
-import google.generativeai as genai
-import uvicorn
-import json
-import asyncio
-from fastapi import FastAPI
+import os, subprocess, json, asyncio, google.generativeai as genai, uvicorn
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-# --- Configuration ---
-logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -19,81 +10,66 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 WORKSPACE = os.path.abspath("/app/workspace")
 current_dir = WORKSPACE
 
-SYSTEM_PROMPT = (
-    "You are a High-Speed Terminal AI Agent. "
-    "Current working directory: {cwd}\n"
-    "RULES:\n"
-    "1. If the user just greets, reply instantly without tools.\n"
-    "2. If the user gives a task, use tools immediately. No yapping.\n"
-    "3. When finished, provide a brief summary."
-)
-
-# --- Tools ---
-def execute_command(command: str) -> str:
+# --- Fast Tools ---
+def execute_command(command: str):
     global current_dir
-    cmd = command.strip()
     try:
-        if cmd.startswith("cd "):
-            target = cmd[3:].strip()
+        if command.strip().startswith("cd "):
+            target = command.strip()[3:].strip()
             new_path = os.path.normpath(os.path.join(current_dir, target))
-            if os.path.exists(new_path):
-                current_dir = new_path
-                return f"Directory changed to: {current_dir}"
-            return "Error: Path not found."
-        process = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60, cwd=current_dir)
-        return f"OUT: {process.stdout}\nERR: {process.stderr}".strip() or "Success"
+            if os.path.exists(new_path): current_dir = new_path; return f"dir: {current_dir}"
+            return "err: path not found"
+        res = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30, cwd=current_dir)
+        return f"{res.stdout}\n{res.stderr}".strip() or "Success"
     except Exception as e: return str(e)
 
-def write_file(path: str, content: str) -> str:
-    try:
-        full_path = os.path.normpath(os.path.join(current_dir, path))
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, "w", encoding="utf-8") as f: f.write(content)
-        return f"Saved: {path}"
-    except Exception as e: return str(e)
-
-def read_file(path: str) -> str:
-    try:
-        full_path = os.path.normpath(os.path.join(current_dir, path))
-        with open(full_path, "r", encoding="utf-8") as f: return f.read()
-    except Exception as e: return str(e)
-
-# --- Core Logic ---
 async def stream_agent_logic(user_input, history):
-    if not GEMINI_API_KEY:
-        yield f"data: {json.dumps({'reply': 'Error: Missing API Key'})}\n\n"
-        return
+    if not GEMINI_API_KEY: yield f"data: {json.dumps({'reply': 'No Key'})}\n\n"; return
     genai.configure(api_key=GEMINI_API_KEY)
+    
+    # --- ⚡ SHORT-CIRCUIT SPEED UP ⚡ ---
+    # ถ้าข้อความสั้นและไม่มีคำสั่งรันระบบ ให้ใช้โมเดลแบบไม่มี Tools เพื่อความไวระดับ 1-2 วินาที
+    is_task = any(word in user_input.lower() for word in ['run', 'sudo', 'ls', 'python', 'cat', 'write', 'mkdir', 'cd', 'git', 'rm'])
+    
+    model_name = 'gemini-3.1-flash-lite'
+    tools_list = [execute_command] if is_task else []
+    
     model = genai.GenerativeModel(
-        model_name='gemini-3.1-flash-lite',
-        tools=[execute_command, write_file, read_file],
-        system_instruction=SYSTEM_PROMPT.format(cwd=current_dir)
+        model_name=model_name,
+        tools=tools_list,
+        system_instruction="Fast Agent. Reply briefly. If it's a greeting, just say hi. Current dir: " + current_dir
     )
-    chat = model.start_chat(history=[{"role": h["role"], "parts": [h["content"]]} for h in history[-5:]])
+    
+    # ส่งประวัติแค่พอประมาณเพื่อความไว
+    chat = model.start_chat(history=[{"role": h["role"], "parts": [h["content"]]} for h in history[-3:]])
+    
     try:
         response = chat.send_message(user_input)
-        for _ in range(12):
+        
+        # วนลูปเฉพาะเมื่อมี Task เท่านั้น
+        for _ in range(10 if is_task else 1):
             parts = response.candidates[0].content.parts
             calls = [p.function_call for p in parts if p.function_call]
+            
             if not calls:
                 yield f"data: {json.dumps({'reply': response.text})}\n\n"
                 break
+            
             tool_responses = []
             for fn in calls:
-                args = dict(fn.args)
-                if fn.name == "execute_command": res = execute_command(args.get("command", ""))
-                elif fn.name == "write_file": res = write_file(args.get("path", ""), args.get("content", ""))
-                elif fn.name == "read_file": res = read_file(args.get("path", ""))
+                res = execute_command(fn.args.get("command", ""))
                 yield f"data: {json.dumps({'step': fn.name, 'result': res})}\n\n"
                 tool_responses.append(genai.protos.Part(function_response=genai.protos.FunctionResponse(name=fn.name, response={'result': res})))
+            
             response = chat.send_message(genai.protos.Content(parts=tool_responses))
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
     except Exception as e:
-        yield f"data: {json.dumps({'reply': f'Error: {str(e)}'})}\n\n"
+        yield f"data: {json.dumps({'reply': f'Err: {str(e)}'})}\n\n"
 
 @app.post("/chat")
-async def chat_endpoint(req: dict):
-    return StreamingResponse(stream_agent_logic(req.get('message', ''), req.get('history', [])), media_type="text/event-stream")
+async def chat_endpoint(req: Request):
+    data = await req.json()
+    return StreamingResponse(stream_agent_logic(data.get('message', ''), data.get('history', [])), media_type="text/event-stream")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
