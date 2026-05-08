@@ -1,183 +1,114 @@
-import os
-import subprocess
-import json
-import logging
-import google.generativeai as genai
-from supabase import create_client, Client
+import os, subprocess, logging, google.generativeai as genai, uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-import uvicorn
 
-# --- Setup Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [AGENT_V10] - %(message)s')
-logger = logging.getLogger(__name__)
-
+# --- Fast Config ---
+logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# --- Environment Configuration ---
 WORKSPACE = os.path.abspath("/app/workspace")
 current_dir = WORKSPACE
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Initialize Supabase
-supabase = None
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("Database connected.")
-    except: logger.error("Database connection failed.")
-
-# === 1. Tool Definitions ===
+# === 1. Execution Tools ===
 
 def execute_command(command: str) -> str:
     global current_dir
+    cmd = command.strip()
     try:
-        command = command.strip()
-        if command.startswith("cd "):
-            target = command[3:].strip()
+        if cmd.startswith("cd "):
+            target = cmd[3:].strip()
             new_path = os.path.normpath(os.path.join(current_dir, target))
-            if os.path.exists(new_path) and os.path.isdir(new_path):
-                current_dir = new_path
-                return f"✅ Switched to {current_dir}"
-            return f"❌ Directory not found: {target}"
-        
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=60, cwd=current_dir
-        )
-        return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nEXIT_CODE: {result.returncode}"
-    except Exception as e:
-        return f"❌ Execution Error: {str(e)}"
+            if os.path.exists(new_path): current_dir = new_path; return f"Changed dir to: {current_dir}"
+            return "Error: Path not found"
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60, cwd=current_dir)
+        return f"OUT: {res.stdout}\nERR: {res.stderr}".strip() or "Success"
+    except Exception as e: return f"System Error: {str(e)}"
 
 def write_file(path: str, content: str) -> str:
     try:
-        full_path = os.path.normpath(os.path.join(current_dir, path))
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return f"✅ File saved: {path}"
-    except Exception as e:
-        return f"❌ Write Error: {str(e)}"
+        p = os.path.normpath(os.path.join(current_dir, path))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f: f.write(content)
+        return f"Saved: {path}"
+    except Exception as e: return f"Write Error: {str(e)}"
 
 def read_file(path: str) -> str:
     try:
-        full_path = os.path.normpath(os.path.join(current_dir, path))
-        with open(full_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        return f"❌ Read Error: {str(e)}"
+        p = os.path.normpath(os.path.join(current_dir, path))
+        with open(p, "r", encoding="utf-8") as f: return f.read()
+    except Exception as e: return f"Read Error: {str(e)}"
 
-# === 2. AI Core (Gemini 3.1 Flash Loop) ===
+# === 2. Autonomous Agent Engine (Your Logic) ===
 
 def run_agent(user_input: str, history: list) -> dict:
-    if not GEMINI_API_KEY:
-        return {"reply": "Missing API Key", "steps": []}
-
-    genai.configure(api_key=GEMINI_API_KEY)
+    if not GEMINI_API_KEY: return {"reply": "Missing API Key", "steps": []}
     
-    # ใช้ชื่อรุ่น gemini-flash-latest ตามที่คุณเลือก
+    genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(
-        model_name='gemini-flash-latest', 
+        model_name='gemini-3.1-flash', 
         tools=[execute_command, write_file, read_file]
     )
 
-    chat_history = []
-    for h in history[-10:]:
-        role = "user" if h["role"] == "user" else "model"
-        chat_history.append({"role": role, "parts": [h["content"]]})
+    # ส่งประวัติย้อนหลัง 3 ข้อความเพื่อให้จำบริบทได้
+    chat = model.start_chat(history=[{"role": h["role"], "parts": [h["content"]]} for h in history[-3:]])
 
-    sys_instr = f"""
-[AGENT_SYSTEM_V10.6]
-Environment: Linux (Railway)
-Current Dir: {current_dir}
-Status: Technical Assistant Mode (No Roleplay)
-Rule: Use tools for all technical tasks. Execute sequential steps if needed.
-"""
+    # สั่งให้ AI รู้ตัวว่าเป็นคนคุม ถ้างานไม่จบให้สั่ง Tool ต่อ ถ้าจบให้สรุปผล
+    sys_logic = f"CWD: {current_dir}\nTask: {user_input}\nInstruction: You are the controller. Use tools until the task is 100% complete. If you need more steps, keep calling tools. If finished, provide a final summary."
 
-    chat = model.start_chat(history=chat_history)
     steps = []
-
     try:
-        # ส่งคำสั่งเริ่มต้น
-        response = chat.send_message(f"{sys_instr}\n\nUser: {user_input}")
+        # 1. ส่งคำสั่งครั้งแรกเพื่อเริ่มภารกิจ
+        response = chat.send_message(sys_logic)
 
-        # วนลูปจัดการ Tool Calls จนกว่า AI จะทำงานเสร็จ
-        # นี่คือส่วนที่แก้ปัญหา "Could not convert part.function_call to text"
-        max_turns = 5  # ป้องกัน Loop นรก
-        turn = 0
-        
-        while turn < max_turns:
-            # เช็คว่ารอบนี้มีการเรียกใช้ Function หรือไม่
+        # 2. Autonomous Loop: ตราบใดที่ AI ยังตัดสินใจส่ง Tool Call มา Script จะไม่หยุดส่งกลับ
+        while True:
             parts = response.candidates[0].content.parts
-            function_calls = [p.function_call for p in parts if p.function_call]
+            calls = [p.function_call for p in parts if p.function_call]
             
-            if not function_calls:
-                break  # ไม่มี Function Call แล้ว จบการทำงาน
+            # ถ้าไม่มีคำสั่ง Tool Call เพิ่มเติม แสดงว่า AI ตัดสินใจว่า "เสร็จงาน" แล้ว -> ออกจากลูป
+            if not calls:
+                break
             
-            turn += 1
             tool_responses = []
-            
-            for fn in function_calls:
+            for fn in calls:
                 args = dict(fn.args)
-                res_val = ""
+                # รันงานตามที่ AI สั่งมาในรอบนั้นๆ
+                if fn.name == "execute_command": res = execute_command(args.get("command"))
+                elif fn.name == "write_file": res = write_file(args.get("path"), args.get("content"))
+                else: res = read_file(args.get("path"))
                 
-                # เรียกใช้งาน Tool ตามที่ AI สั่ง
-                if fn.name == "execute_command": res_val = execute_command(args.get("command"))
-                elif fn.name == "write_file": res_val = write_file(args.get("path"), args.get("content"))
-                elif fn.name == "read_file": res_val = read_file(args.get("path"))
+                steps.append({"tool": fn.name, "args": args, "result": res})
                 
-                steps.append({"tool": fn.name, "args": args, "result": res_val})
-                
-                # เตรียมคำตอบส่งกลับไปให้ AI
-                tool_responses.append(
-                    genai.protos.Part(
-                        function_response=genai.protos.FunctionResponse(
-                            name=fn.name, 
-                            response={'result': res_val}
-                        )
-                    )
-                )
+                # เก็บผลลัพธ์ใส่กล่อง เตรียมส่งกลับไปถาม AI รอบถัดไป
+                tool_responses.append(genai.protos.Part(
+                    function_response=genai.protos.FunctionResponse(name=fn.name, response={'result': res})
+                ))
             
-            # ส่งผลลัพธ์กลับไปให้ AI เพื่อประมวลผลต่อ
+            # 3. สคริปต์ออโต้ส่งผลลัพธ์กลับไปให้ AI ตัดสินใจว่าจะทำอะไรต่อ (วนไปเรื่อยๆ)
             response = chat.send_message(genai.protos.Content(parts=tool_responses))
+            
+            # Safety Brake: ป้องกัน AI วนวนอยู่ที่เดิมเกิน 15 รอบ
+            if len(steps) > 15: break
 
-        # เมื่อ Loop จบ response.text จะพร้อมใช้งาน
-        final_reply = response.text
-        
-        if supabase:
-            try:
-                supabase.table("memories").insert({
-                    "user_query": user_input,
-                    "content": final_reply,
-                    "project_context": "TECHNICAL_AGENT_STABLE"
-                }).execute()
-            except: pass
+        return {"reply": response.text, "steps": steps}
+    except Exception as e: return {"reply": f"Loop Error: {str(e)}", "steps": steps}
 
-        return {"reply": final_reply, "steps": steps}
+# === 3. API Entry ===
 
-    except Exception as e:
-        logger.error(f"Error in Agent: {str(e)}")
-        return {"reply": f"System Error: {str(e)}", "steps": steps}
-
-# === 3. FastAPI Entry Points ===
-
-class ChatRequest(BaseModel):
-    message: str
-    history: list = []
+class ChatReq(BaseModel): message: str; history: list = []
 
 @app.post("/chat")
-async def chat_endpoint(req: ChatRequest):
-    return run_agent(req.message, req.history)
+async def api(req: ChatReq): return run_agent(req.message, req.history)
 
 @app.get("/", response_class=HTMLResponse)
 def index():
     try:
         with open("static/index.html", "r", encoding="utf-8") as f: return f.read()
-    except: return "Frontend missing."
+    except: return "Ready."
 
 if __name__ == "__main__":
     os.makedirs(WORKSPACE, exist_ok=True)
