@@ -2,7 +2,7 @@ import os
 import subprocess
 import json
 from groq import Groq
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -150,11 +150,8 @@ def health():
     return {"status": "ok", "agent": "AI Terminal Agent"}
 
 @app.post("/chat")
-async def chat(req: ChatRequest, request: Request):
-    api_key = request.headers.get("X-Groq-API-Key") or os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        return {"error": "No API key provided"}
-    client = Groq(api_key=api_key)
+async def chat(req: ChatRequest):
+    client = Groq(api_key=os.environ["GROQ_API_KEY"])
     result = run_agent(req.message, req.history, client)
     return result
 

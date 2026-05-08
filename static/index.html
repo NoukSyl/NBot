@@ -123,34 +123,6 @@
     50% { opacity: 0.3; }
   }
 
-  .api-config {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .api-input {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
-    padding: 5px 10px;
-    border-radius: 6px;
-    width: 240px;
-    outline: none;
-    transition: border-color 0.2s;
-  }
-
-  .api-input:focus { border-color: var(--accent2); }
-  .api-input::placeholder { color: var(--muted); }
-
-  .api-label {
-    font-size: 11px;
-    color: var(--muted);
-    font-family: 'JetBrains Mono', monospace;
-  }
-
   /* Main layout */
   .main {
     display: flex;
@@ -564,10 +536,6 @@
     <div class="logo-icon">▸_</div>
     <div class="logo-text"><span>AI</span>Terminal Agent</div>
   </div>
-  <div class="api-config">
-    <span class="api-label">API KEY:</span>
-    <input class="api-input" type="password" id="apiKeyInput" placeholder="gsk_xxxxxxxxxxxxxxxx">
-  </div>
   <div class="status-pill">
     <div class="status-dot"></div>
     <span id="statusText">READY</span>
@@ -660,19 +628,9 @@
     return document.getElementById('serverUrl').value.replace(/\/$/, '');
   }
 
-  function getApiKey() {
-    return document.getElementById('apiKeyInput').value.trim();
-  }
-
   async function sendMessage() {
     const text = inputEl.value.trim();
     if (!text || isLoading) return;
-
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      alert('กรุณาใส่ Groq API Key ด้านบนก่อนครับ');
-      return;
-    }
 
     // Hide welcome
     const welcome = document.getElementById('welcome');
@@ -700,7 +658,6 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Groq-API-Key': apiKey
         },
         body: JSON.stringify({ message: text, history })
       });
