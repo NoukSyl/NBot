@@ -1,29 +1,13 @@
-# ── Build Stage ───────────────────────────────────────────
-FROM python:3.11-slim AS builder
-
-WORKDIR /app
-
-# Install deps first (cached layer)
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt
-
-# ── Runtime Stage ─────────────────────────────────────────
 FROM python:3.11-slim
 
+# ติดตั้ง tools ที่ agent จะใช้
+RUN apt-get update && apt-get install -y \
+    git curl wget nano nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-
-# Copy source code
-COPY main.py .
-
-# Railway injects $PORT at runtime — Gradio needs this env var too
-ENV GRADIO_SERVER_NAME=0.0.0.0
-
-# Expose default port (Railway overrides with $PORT)
-EXPOSE 7860
-
-CMD ["python", "main.py"]
+CMD ["python", "agent.py"]

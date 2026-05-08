@@ -1,9 +1,1 @@
-fastapi==0.115.5
-uvicorn[standard]==0.32.1
-gradio==5.9.1
-requests==2.32.3
-pydantic==2.10.3
-python-multipart==0.0.20
-starlette==0.41.3
-python-telegram-bot==21.6
-discord.py==2.4.0
+groq
