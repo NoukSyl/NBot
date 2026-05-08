@@ -111,13 +111,17 @@ def run_agent(user_input: str, history: list, client: Groq) -> dict:
     steps = []
 
     while True:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=2048
-        )
+        try:
+            response = client.chat.completions.create(
+                model="llama3-groq-70b-8192-tool-use-preview",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=2048
+            )
+        except Exception as e:
+            return {"reply": f"LLM error: {str(e)}", "steps": steps}
+
         msg = response.choices[0].message
 
         if not msg.tool_calls:
@@ -126,7 +130,10 @@ def run_agent(user_input: str, history: list, client: Groq) -> dict:
         messages.append(msg)
         for tc in msg.tool_calls:
             name = tc.function.name
-            args = json.loads(tc.function.arguments)
+            try:
+                args = json.loads(tc.function.arguments)
+            except Exception:
+                args = {}
             result = run_tool(name, args)
             steps.append({"tool": name, "args": args, "result": result})
             messages.append({
