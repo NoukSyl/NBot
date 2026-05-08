@@ -583,7 +583,7 @@
 
     <div class="sidebar-title" style="margin-top:4px">Server URL</div>
     <div class="server-input-wrap">
-      <input class="server-input" id="serverUrl" value="http://localhost:8000" placeholder="https://your-app.railway.app">
+      <input class="server-input" id="serverUrl" value="" placeholder="https://your-app.railway.app">
     </div>
 
     <div class="sidebar-title" style="margin-top:4px">History</div>
@@ -625,7 +625,8 @@
   }
 
   function getServerUrl() {
-    return document.getElementById('serverUrl').value.replace(/\/$/, '');
+    const val = document.getElementById('serverUrl').value.trim();
+    return val ? val.replace(/\/$/, '') : '';
   }
 
   async function sendMessage() {
