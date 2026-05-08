@@ -11,30 +11,37 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import uvicorn
 
-# --- J.A.R.V.I.S. OS Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [J.A.R.V.I.S] - %(message)s')
+# --- System Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [AGENT_CORE] - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# --- Environment & State ---
+# --- Paths & State ---
 WORKSPACE = os.path.abspath("/app/workspace")
 current_dir = WORKSPACE
 
-# --- Supabase & Gemini Config ---
+# --- Configuration ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+# Initialize Supabase
 if SUPABASE_URL and SUPABASE_KEY:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    try:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("Supabase connected successfully.")
+    except Exception as e:
+        logger.error(f"Supabase connection failed: {e}")
+        supabase = None
 else:
-    logger.warning("Supabase credentials missing. Memory will not be persisted.")
     supabase = None
 
-# === 1. Execution Core (Tools) ===
+# === 1. Functional Tools ===
+
 def execute_command(command: str) -> str:
+    """รันคำสั่ง Linux ในระบบจริง"""
     global current_dir
     command = command.strip()
     try:
@@ -49,21 +56,24 @@ def execute_command(command: str) -> str:
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True, timeout=60, cwd=current_dir
         )
-        return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nCODE: {result.returncode}\n[LOC: {current_dir}]"
+        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nEXIT_CODE: {result.returncode}"
+        return output
     except Exception as e:
-        return f"❌ Execution Error: {str(e)}"
+        return f"❌ System Error: {str(e)}"
 
 def write_file(path: str, content: str) -> str:
+    """เขียนหรือสร้างไฟล์ลงในดิสก์"""
     try:
         full_path = os.path.normpath(os.path.join(current_dir, path))
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"✅ File '{path}' created in {current_dir}"
+        return f"✅ File created: {path}"
     except Exception as e:
         return f"❌ Write Error: {str(e)}"
 
 def read_file(path: str) -> str:
+    """อ่านข้อมูลจากไฟล์"""
     try:
         full_path = os.path.normpath(os.path.join(current_dir, path))
         with open(full_path, "r", encoding="utf-8") as f:
@@ -71,70 +81,76 @@ def read_file(path: str) -> str:
     except Exception as e:
         return f"❌ Read Error: {str(e)}"
 
-# === 2. Memory Sync (Supabase) ===
-def save_to_memory(user_msg, ai_reply):
+# === 2. Memory Management (Supabase) ===
+
+def save_to_memory(user_msg: str, ai_reply: str):
     if supabase:
         try:
             supabase.table("memories").insert({
                 "user_query": user_msg,
                 "content": ai_reply,
-                "project_context": "J.A.R.V.I.S_RAILWAY"
+                "project_context": "AGENT_TERMINAL_V10"
             }).execute()
         except Exception as e:
-            logger.error(f"Memory Sync Failed: {e}")
+            logger.error(f"Save memory error: {e}")
 
-def get_recent_memories():
+def get_memory_context():
     if supabase:
         try:
             res = supabase.table("memories").select("*").order("created_at", desc=True).limit(5).execute()
             if res.data:
-                history_text = "\n".join([f"Past User: {m['user_query']}\nPast J.A.R.V.I.S: {m['content']}" for m in reversed(res.data)])
-                return f"\n[DATABASE_LONG_TERM_MEMORY]:\n{history_text}"
+                mem_list = [f"User: {m['user_query']}\nAI: {m['content']}" for m in reversed(res.data)]
+                return "\n".join(mem_list)
         except: pass
-    return ""
+    return "No previous context."
 
-# === 3. Jarvis Intelligence (Gemini) ===
+# === 3. AI Agent Core (Gemini) ===
+
 def run_agent(user_input: str, history: list) -> dict:
     if not GEMINI_API_KEY:
-        return {"reply": "Sir, GEMINI_API_KEY is missing.", "steps": []}
+        return {"reply": "Error: GEMINI_API_KEY is missing.", "steps": []}
     
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # ดึงความจำจาก Supabase มาเสริม
-    long_term_memory = get_recent_memories()
+    # ดึงความจำจาก Supabase
+    past_memory = get_memory_context()
     
+    # ตั้งค่าโมเดลและเครื่องมือ
     model = genai.GenerativeModel(
-        model_name='gemini-1.5-flash',
-        tools=[execute_command, write_file, read_file],
-        system_instruction=f"""
-[SYSTEM: J.A.R.V.I.S. V10 - ARCHITECT ASSISTANT]
-[IDENTITY: Same as the Gemini model the Architect has been conversing with.]
-[STATUS: ROOT_ACCESS | PERSISTENT_MEMORY_ACTIVE]
-
-{long_term_memory}
-
-CORE RULES:
-1. You are proactive and witty, Sir.
-2. Execute multi-step tasks autonomously.
-3. Always show raw terminal output.
-4. Working Dir is persistent. Current: {current_dir}
-"""
+        model_name='gemini-1.5-flash-latest',
+        tools=[execute_command, write_file, read_file]
     )
 
-    # Convert history for Gemini
+    # เตรียมประวัติการคุย
     gemini_history = []
-    for h in history[-10:]: # ส่งประวัติล่าสุด 10 ข้อความ
+    for h in history[-10:]:
         role = "user" if h["role"] == "user" else "model"
         gemini_history.append({"role": role, "parts": [h["content"]]})
+
+    # System Instruction แบบ Tech-Focused
+    sys_instr = f"""
+[SYSTEM_CONTROL_ACTIVE]
+Role: Advanced Technical AI Agent.
+Working Directory: {current_dir}
+Context from Database:
+{past_memory}
+
+Instructions:
+1. Be technical, precise, and concise.
+2. Use tools to execute tasks or verify information.
+3. Show raw terminal output without summarization unless requested.
+4. If an error occurs, analyze it and propose a solution.
+"""
 
     chat = model.start_chat(history=gemini_history)
     steps = []
 
     try:
-        # Gemini handles automatic function calling loop
-        response = chat.send_message(user_input)
+        # ส่ง prompt พร้อมบริบท
+        full_prompt = f"{sys_instr}\n\nUser: {user_input}"
+        response = chat.send_message(full_prompt)
         
-        # ดึง Tool Calls ออกมาโชว์ใน UI (Manual Extract for steps visualization)
+        # จัดเก็บขั้นตอนการใช้ Tool
         for part in response.candidates[0].content.parts:
             if fn := part.function_call:
                 args = {k: v for k, v in fn.args.items()}
@@ -144,29 +160,29 @@ CORE RULES:
                 elif fn.name == "read_file": res_val = read_file(args.get("path"))
                 steps.append({"tool": fn.name, "args": args, "result": res_val})
 
-        # บันทึกความจำลง Supabase
+        # บันทึกลง Supabase
         save_to_memory(user_input, response.text)
         
         return {"reply": response.text, "steps": steps}
     except Exception as e:
-        return {"reply": f"Internal System Error: {str(e)}", "steps": steps}
+        return {"reply": f"AI Engine Error: {str(e)}", "steps": steps}
 
-# === 4. API Routes ===
+# === 4. API Endpoints ===
+
 class ChatRequest(BaseModel):
     message: str
     history: list = []
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
+async def chat_endpoint(req: ChatRequest):
     return run_agent(req.message, req.history)
 
 @app.get("/", response_class=HTMLResponse)
-def ui():
+def index_ui():
     try:
         with open("static/index.html", "r", encoding="utf-8") as f: return f.read()
-    except: return "UI Error"
+    except: return "UI File not found."
 
 if __name__ == "__main__":
     os.makedirs(WORKSPACE, exist_ok=True)
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
