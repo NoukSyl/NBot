@@ -2,7 +2,6 @@ import os
 import subprocess
 import json
 import logging
-from datetime import datetime
 import google.generativeai as genai
 from supabase import create_client, Client
 from fastapi import FastAPI
@@ -11,14 +10,14 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import uvicorn
 
-# --- Setup Logging ---
+# --- System Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [AGENT_CORE] - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# --- State & Config ---
+# --- Workspace & Credentials ---
 WORKSPACE = os.path.abspath("/app/workspace")
 current_dir = WORKSPACE
 
@@ -26,47 +25,51 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Initialize Supabase
+# Initialize Database
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("Database: Connected")
-    except:
-        logger.error("Database: Connection Failed")
+        logger.info("Database: Supabase Connected")
+    except Exception as e:
+        logger.error(f"Database: Connection Failed -> {e}")
 
-# === 1. Core Execution Tools ===
+# === 1. Execution Engine (Bash Tools) ===
 
 def execute_command(command: str) -> str:
+    """รันคำสั่ง Linux ใน Workspace"""
     global current_dir
+    command = command.strip()
     try:
-        command = command.strip()
         if command.startswith("cd "):
             target = command[3:].strip()
             new_path = os.path.normpath(os.path.join(current_dir, target))
             if os.path.exists(new_path) and os.path.isdir(new_path):
                 current_dir = new_path
-                return f"✅ Changed directory to: {current_dir}"
+                return f"✅ Directory changed: {current_dir}"
             return f"❌ Error: Path '{target}' not found."
 
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True, timeout=60, cwd=current_dir
         )
-        return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nCODE: {result.returncode}"
+        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nCODE: {result.returncode}"
+        return output
     except Exception as e:
-        return f"❌ System Error: {str(e)}"
+        return f"❌ Runtime Error: {str(e)}"
 
 def write_file(path: str, content: str) -> str:
+    """สร้างหรือแก้ไขไฟล์"""
     try:
         full_path = os.path.normpath(os.path.join(current_dir, path))
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"✅ File created: {path}"
+        return f"✅ Successfully written: {path}"
     except Exception as e:
         return f"❌ Write Error: {str(e)}"
 
 def read_file(path: str) -> str:
+    """อ่านข้อมูลไฟล์"""
     try:
         full_path = os.path.normpath(os.path.join(current_dir, path))
         with open(full_path, "r", encoding="utf-8") as f:
@@ -74,103 +77,95 @@ def read_file(path: str) -> str:
     except Exception as e:
         return f"❌ Read Error: {str(e)}"
 
-# === 2. Memory & Intelligence ===
-
-def get_db_context():
-    if not supabase: return ""
-    try:
-        res = supabase.table("memories").select("*").order("created_at", desc=True).limit(5).execute()
-        if res.data:
-            return "\n".join([f"Previous Task: {m['user_query']}\nResult: {m['content']}" for m in reversed(res.data)])
-    except: pass
-    return ""
+# === 2. AI Logic (Gemini 3.1 Flash) ===
 
 def run_agent(user_input: str, history: list) -> dict:
     if not GEMINI_API_KEY:
-        return {"reply": "Error: GEMINI_API_KEY is missing.", "steps": []}
+        return {"reply": "Error: GEMINI_API_KEY not found in Environment.", "steps": []}
     
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # --- ปรับแก้ชื่อโมเดลเป็นมาตรฐานสูงสุด ---
-    # ใช้ชื่อ 'gemini-1.5-flash' (ตัวหลัก) หรือ 'gemini-1.5-flash-001'
-    try:
-        model = genai.GenerativeModel(
-            model_name='gemini-1.5-flash', # ตัดคำว่า -latest ออกเพื่อความเสถียร
-            tools=[execute_command, write_file, read_file]
-        )
-    except:
-        # Fallback กรณี API บางตัวต้องการเจาะจงเวอร์ชัน
-        model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
+    # ดึงความจำล่าสุดจาก Supabase (ถ้ามี)
+    db_context = ""
+    if supabase:
+        try:
+            res = supabase.table("memories").select("*").order("created_at", desc=True).limit(3).execute()
+            db_context = "\n".join([f"PastTask: {m['user_query']}" for m in reversed(res.data)])
+        except: pass
 
-    # Prepare Context
-    db_ctx = get_db_context()
-    sys_instruction = f"""
-[SYSTEM_CONTEXT]
-Current Working Directory: {current_dir}
-DB Memory: {db_ctx}
+    # ตั้งค่าโมเดลเป็น Gemini 3.1 Flash (รุ่นล่าสุด)
+    model = genai.GenerativeModel(
+        model_name='gemini-3.1-flash', 
+        tools=[execute_command, write_file, read_file]
+    )
 
-[INSTRUCTIONS]
-1. You are a technical assistant. Execute commands directly.
-2. Provide raw output from the terminal.
-3. If a command fails, fix it.
+    # จัดการประวัติการสนทนา (ส่งไปแค่ 10 ข้อความเพื่อประหยัด Token)
+    chat_history = []
+    for h in history[-10:]:
+        role = "user" if h["role"] == "user" else "model"
+        chat_history.append({"role": role, "parts": [h["content"]]})
+
+    # System Instruction
+    sys_prompt = f"""
+[SYSTEM_OPERATOR_V10.5]
+Role: High-Performance Technical Assistant.
+CWD: {current_dir}
+DB_Context: {db_context}
+
+Rules:
+1. Provide raw terminal output. Be concise.
+2. If a task requires multiple steps, use tools sequentially.
+3. No conversational filler. Just results.
 """
 
-    # Format history for Gemini
-    gemini_history = []
-    for h in history[-8:]:
-        role = "user" if h["role"] == "user" else "model"
-        gemini_history.append({"role": role, "parts": [h["content"]]})
-
-    chat = model.start_chat(history=gemini_history)
+    chat = model.start_chat(history=chat_history)
     steps = []
 
     try:
-        # ส่ง Prompt พร้อมบริบทแบบ Inline
-        response = chat.send_message(f"{sys_instruction}\n\nUser Question: {user_input}")
+        # ส่งคำสั่งให้ AI
+        response = chat.send_message(f"{sys_prompt}\n\nUser: {user_input}")
         
-        # วนลูปจัดการ Tool Calls
-        # Note: SDK เวอร์ชันใหม่มักจะจัดการ loop ให้ แต่ถ้าคุณต้องการเก็บ steps ไปโชว์ใน UI
-        # ต้องดึงออกมาแบบนี้:
+        # ประมวลผล Tool Calls
         for part in response.candidates[0].content.parts:
             if fn := part.function_call:
                 args = dict(fn.args)
-                res = ""
-                if fn.name == "execute_command": res = execute_command(args.get("command"))
-                elif fn.name == "write_file": res = write_file(args.get("path"), args.get("content"))
-                elif fn.name == "read_file": res = read_file(args.get("path"))
-                steps.append({"tool": fn.name, "args": args, "result": res})
+                res_val = ""
+                if fn.name == "execute_command": res_val = execute_command(args.get("command"))
+                elif fn.name == "write_file": res_val = write_file(args.get("path"), args.get("content"))
+                elif fn.name == "read_file": res_val = read_file(args.get("path"))
+                steps.append({"tool": fn.name, "args": args, "result": res_val})
 
-        # Save to Supabase
+        # บันทึกลงฐานข้อมูล
         if supabase:
             try:
                 supabase.table("memories").insert({
                     "user_query": user_input,
                     "content": response.text,
-                    "project_context": "TECHNICAL_AGENT"
+                    "project_context": "GEMINI_3.1_FLASH_AGENT"
                 }).execute()
             except: pass
 
         return {"reply": response.text, "steps": steps}
     except Exception as e:
-        # หากเกิด 404 หรือปัญหาเรื่องโมเดล จะแจ้งเตือนที่นี่
-        return {"reply": f"Engine Connectivity Error: {str(e)}", "steps": steps}
+        return {"reply": f"AI Engine Error: {str(e)}", "steps": steps}
 
-# === 3. API Entry Points ===
+# === 3. Web Service (FastAPI) ===
 
 class ChatRequest(BaseModel):
     message: str
     history: list = []
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
+async def chat_api(req: ChatRequest):
     return run_agent(req.message, req.history)
 
 @app.get("/", response_class=HTMLResponse)
-def home():
+def ui():
     try:
         with open("static/index.html", "r", encoding="utf-8") as f: return f.read()
-    except: return "Frontend UI Not Found"
+    except: return "<h1>Terminal UI Ready</h1>"
 
 if __name__ == "__main__":
     os.makedirs(WORKSPACE, exist_ok=True)
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
