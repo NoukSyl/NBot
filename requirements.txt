@@ -1,4 +1,5 @@
 google-generativeai
+supabase
 fastapi
 uvicorn
 python-multipart
