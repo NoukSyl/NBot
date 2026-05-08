@@ -49,7 +49,7 @@ def run_agent(user_input: str, history: list) -> dict:
     
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(
-        model_name='gemini-flash-latest', 
+        model_name='gemini-3.1-flash-lite', 
         tools=[execute_command, write_file, read_file]
     )
 
