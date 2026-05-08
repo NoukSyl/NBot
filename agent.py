@@ -113,7 +113,7 @@ def run_agent(user_input: str, history: list, client: Groq) -> dict:
     while True:
         try:
             response = client.chat.completions.create(
-                model="llama3-groq-70b-8192-tool-use-preview",
+                model="llama-3.3-70b-versatile",
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
@@ -127,7 +127,17 @@ def run_agent(user_input: str, history: list, client: Groq) -> dict:
         if not msg.tool_calls:
             return {"reply": msg.content, "steps": steps}
 
-        messages.append(msg)
+        # Convert message object to dict for clean history
+        tool_calls_payload = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+            }
+            for tc in msg.tool_calls
+        ]
+        messages.append({"role": "assistant", "tool_calls": tool_calls_payload})
+
         for tc in msg.tool_calls:
             name = tc.function.name
             try:
