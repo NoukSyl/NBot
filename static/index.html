@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Terminal Agent</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #0f0f1a;
+    --surface2: #141428;
+    --border: #1e1e3a;
+    --accent: #00ff88;
+    --accent2: #7c6fea;
+    --accent3: #ff6b6b;
+    --text: #e8e8f0;
+    --muted: #5a5a7a;
+    --tool-bg: #0d1a12;
+    --tool-border: #1a3a28;
+    --user-bg: #110d1f;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Scanline overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,255,136,0.012) 2px,
+      rgba(0,255,136,0.012) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* Header */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .logo-icon {
+    width: 32px;
+    height: 32px;
+    border: 1.5px solid var(--accent);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    color: var(--accent);
+    box-shadow: 0 0 12px rgba(0,255,136,0.2);
+    animation: pulse-border 3s ease-in-out infinite;
+  }
+
+  @keyframes pulse-border {
+    0%,100% { box-shadow: 0 0 12px rgba(0,255,136,0.2); }
+    50% { box-shadow: 0 0 20px rgba(0,255,136,0.4); }
+  }
+
+  .logo-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    letter-spacing: 0.05em;
+  }
+
+  .logo-text span { color: var(--accent); }
+
+  .status-pill {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--tool-bg);
+    border: 1px solid var(--tool-border);
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: blink 2s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%,100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .api-config {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .api-input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    width: 240px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .api-input:focus { border-color: var(--accent2); }
+  .api-input::placeholder { color: var(--muted); }
+
+  .api-label {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* Main layout */
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* Chat area */
+  .chat-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    scroll-behavior: smooth;
+  }
+
+  .messages::-webkit-scrollbar { width: 4px; }
+  .messages::-webkit-scrollbar-track { background: transparent; }
+  .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Welcome */
+  .welcome {
+    text-align: center;
+    padding: 60px 20px;
+    opacity: 0;
+    animation: fadeUp 0.8s ease forwards 0.3s;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .welcome-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 10px;
+    text-shadow: 0 0 30px rgba(0,255,136,0.3);
+  }
+
+  .welcome-sub {
+    font-size: 14px;
+    color: var(--muted);
+    margin-bottom: 32px;
+  }
+
+  .quick-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+
+  .quick-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .quick-btn:hover {
+    border-color: var(--accent2);
+    color: var(--accent);
+    transform: translateY(-1px);
+  }
+
+  /* Messages */
+  .msg {
+    display: flex;
+    gap: 14px;
+    opacity: 0;
+    animation: fadeUp 0.4s ease forwards;
+    max-width: 900px;
+  }
+
+  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+
+  .avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .avatar.ai {
+    background: linear-gradient(135deg, #0a2a1a, #0d3a22);
+    border: 1px solid var(--tool-border);
+    color: var(--accent);
+  }
+
+  .avatar.user-av {
+    background: linear-gradient(135deg, #1a0d2e, #250d3a);
+    border: 1px solid #2a1a4a;
+    color: var(--accent2);
+  }
+
+  .msg-content { display: flex; flex-direction: column; gap: 8px; max-width: calc(100% - 46px); }
+
+  .bubble {
+    padding: 12px 16px;
+    border-radius: 12px;
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+
+  .bubble.ai {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px 12px 12px 12px;
+  }
+
+  .bubble.user {
+    background: var(--user-bg);
+    border: 1px solid #2a1a4a;
+    color: var(--text);
+    border-radius: 12px 4px 12px 12px;
+  }
+
+  /* Tool steps */
+  .steps { display: flex; flex-direction: column; gap: 6px; }
+
+  .step {
+    background: var(--tool-bg);
+    border: 1px solid var(--tool-border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .step-header:hover { background: rgba(0,255,136,0.04); }
+
+  .tool-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .tool-badge.exec { background: rgba(255,107,107,0.15); color: var(--accent3); border: 1px solid rgba(255,107,107,0.2); }
+  .tool-badge.write { background: rgba(124,111,234,0.15); color: var(--accent2); border: 1px solid rgba(124,111,234,0.2); }
+  .tool-badge.read { background: rgba(0,255,136,0.1); color: var(--accent); border: 1px solid rgba(0,255,136,0.15); }
+
+  .step-cmd {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--text);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .step-toggle {
+    font-size: 10px;
+    color: var(--muted);
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .step-body {
+    border-top: 1px solid var(--tool-border);
+    padding: 10px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #88aa99;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 200px;
+    overflow-y: auto;
+    display: none;
+  }
+
+  .step-body.open { display: block; }
+
+  /* Thinking indicator */
+  .thinking {
+    display: flex;
+    gap: 14px;
+    opacity: 0;
+    animation: fadeUp 0.3s ease forwards;
+  }
+
+  .thinking-bubble {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px 12px 12px 12px;
+    padding: 14px 18px;
+    display: flex;
+    gap: 5px;
+    align-items: center;
+  }
+
+  .dot {
+    width: 5px;
+    height: 5px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: bounce 1.2s ease-in-out infinite;
+    opacity: 0.5;
+  }
+
+  .dot:nth-child(2) { animation-delay: 0.2s; }
+  .dot:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes bounce {
+    0%,60%,100% { transform: translateY(0); opacity: 0.5; }
+    30% { transform: translateY(-5px); opacity: 1; }
+  }
+
+  /* Input area */
+  .input-area {
+    padding: 16px 24px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .input-wrap {
+    display: flex;
+    gap: 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 14px;
+    transition: border-color 0.2s;
+  }
+
+  .input-wrap:focus-within { border-color: var(--accent2); }
+
+  #userInput {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 14px;
+    outline: none;
+    resize: none;
+    max-height: 120px;
+    min-height: 22px;
+    line-height: 1.5;
+  }
+
+  #userInput::placeholder { color: var(--muted); }
+
+  .send-btn {
+    background: var(--accent);
+    border: none;
+    color: #0a0a0f;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.2s;
+    font-size: 15px;
+    align-self: flex-end;
+  }
+
+  .send-btn:hover { background: #00dd77; transform: scale(1.05); }
+  .send-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+
+  .input-hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    text-align: center;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    width: 240px;
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-title {
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--muted);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    background: var(--surface2);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+
+  .stat-label { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+  .stat-val { font-size: 13px; color: var(--accent); font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+
+  .history-list { display: flex; flex-direction: column; gap: 4px; }
+
+  .history-item {
+    padding: 7px 10px;
+    background: var(--surface2);
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+
+  .history-item:hover { border-color: var(--accent2); color: var(--text); }
+
+  .clear-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+    transition: all 0.2s;
+    width: 100%;
+  }
+
+  .clear-btn:hover { border-color: var(--accent3); color: var(--accent3); }
+
+  .server-input-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .server-input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    outline: none;
+    width: 100%;
+    transition: border-color 0.2s;
+  }
+
+  .server-input:focus { border-color: var(--accent2); }
+
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .api-input { width: 160px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="logo">
+    <div class="logo-icon">▸_</div>
+    <div class="logo-text"><span>AI</span>Terminal Agent</div>
+  </div>
+  <div class="api-config">
+    <span class="api-label">API KEY:</span>
+    <input class="api-input" type="password" id="apiKeyInput" placeholder="gsk_xxxxxxxxxxxxxxxx">
+  </div>
+  <div class="status-pill">
+    <div class="status-dot"></div>
+    <span id="statusText">READY</span>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+
+  <!-- Chat -->
+  <div class="chat-area">
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <div class="welcome-title">▸ Terminal Agent</div>
+        <div class="welcome-sub">AI ที่คิดเองและรัน command จริงใน server</div>
+        <div class="quick-actions">
+          <button class="quick-btn" onclick="quickSend(this)">สร้างไฟล์ hello.py แล้วรัน</button>
+          <button class="quick-btn" onclick="quickSend(this)">ดู directory ปัจจุบัน</button>
+          <button class="quick-btn" onclick="quickSend(this)">สร้าง Flask app</button>
+          <button class="quick-btn" onclick="quickSend(this)">เช็ค Python version</button>
+          <button class="quick-btn" onclick="quickSend(this)">สร้าง README.md</button>
+          <button class="quick-btn" onclick="quickSend(this)">รัน pip list</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-wrap">
+        <textarea id="userInput" placeholder="บอกให้ agent ทำอะไรก็ได้... เช่น สร้างโปรเจค Node.js" rows="1"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="sendMessage()">▸</button>
+      </div>
+      <div class="input-hint">Enter ส่ง · Shift+Enter ขึ้นบรรทัดใหม่</div>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-title">Session</div>
+    <div>
+      <div class="stat-row"><span class="stat-label">Messages</span><span class="stat-val" id="msgCount">0</span></div>
+    </div>
+    <div>
+      <div class="stat-row"><span class="stat-label">Tool calls</span><span class="stat-val" id="toolCount">0</span></div>
+    </div>
+
+    <div class="sidebar-title" style="margin-top:4px">Server URL</div>
+    <div class="server-input-wrap">
+      <input class="server-input" id="serverUrl" value="http://localhost:8000" placeholder="https://your-app.railway.app">
+    </div>
+
+    <div class="sidebar-title" style="margin-top:4px">History</div>
+    <div class="history-list" id="historyList"></div>
+
+    <div style="margin-top:auto">
+      <button class="clear-btn" onclick="clearChat()">⟳ Clear Chat</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let history = [];
+  let msgCount = 0;
+  let toolCount = 0;
+  let isLoading = false;
+
+  const messagesEl = document.getElementById('messages');
+  const inputEl = document.getElementById('userInput');
+  const sendBtn = document.getElementById('sendBtn');
+
+  // Auto-resize textarea
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  });
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  function quickSend(btn) {
+    inputEl.value = btn.textContent;
+    sendMessage();
+  }
+
+  function getServerUrl() {
+    return document.getElementById('serverUrl').value.replace(/\/$/, '');
+  }
+
+  function getApiKey() {
+    return document.getElementById('apiKeyInput').value.trim();
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text || isLoading) return;
+
+    const apiKey = getApiKey();
+    if (!apiKey) {
+      alert('กรุณาใส่ Groq API Key ด้านบนก่อนครับ');
+      return;
+    }
+
+    // Hide welcome
+    const welcome = document.getElementById('welcome');
+    if (welcome) welcome.remove();
+
+    isLoading = true;
+    sendBtn.disabled = true;
+    document.getElementById('statusText').textContent = 'THINKING...';
+
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+
+    // Add user message
+    addUserMessage(text);
+    updateHistory(text);
+    msgCount++;
+    document.getElementById('msgCount').textContent = msgCount;
+
+    // Show thinking
+    const thinkingEl = addThinking();
+
+    try {
+      const serverUrl = getServerUrl();
+      const res = await fetch(`${serverUrl}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Groq-API-Key': apiKey
+        },
+        body: JSON.stringify({ message: text, history })
+      });
+
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+
+      const data = await res.json();
+      thinkingEl.remove();
+
+      // Add AI response
+      addAIMessage(data.reply, data.steps || []);
+
+      // Update history for context
+      history.push({ role: 'user', content: text });
+      history.push({ role: 'assistant', content: data.reply });
+
+      // Keep history manageable
+      if (history.length > 20) history = history.slice(-20);
+
+      toolCount += (data.steps || []).length;
+      document.getElementById('toolCount').textContent = toolCount;
+      msgCount++;
+      document.getElementById('msgCount').textContent = msgCount;
+
+    } catch (err) {
+      thinkingEl.remove();
+      addErrorMessage(err.message);
+    }
+
+    isLoading = false;
+    sendBtn.disabled = false;
+    document.getElementById('statusText').textContent = 'READY';
+  }
+
+  function addUserMessage(text) {
+    const el = document.createElement('div');
+    el.className = 'msg user';
+    el.innerHTML = `
+      <div class="avatar user-av">U</div>
+      <div class="msg-content">
+        <div class="bubble user">${escapeHtml(text)}</div>
+      </div>
+    `;
+    messagesEl.appendChild(el);
+    scrollBottom();
+  }
+
+  function addAIMessage(reply, steps) {
+    const el = document.createElement('div');
+    el.className = 'msg';
+
+    let stepsHtml = '';
+    if (steps && steps.length > 0) {
+      stepsHtml = '<div class="steps">';
+      steps.forEach((s, i) => {
+        const badgeClass = s.tool === 'execute_command' ? 'exec' : s.tool === 'write_file' ? 'write' : 'read';
+        const badgeLabel = s.tool === 'execute_command' ? 'EXEC' : s.tool === 'write_file' ? 'WRITE' : 'READ';
+        const cmdPreview = s.tool === 'execute_command' ? s.args.command :
+                           s.tool === 'write_file' ? s.args.path :
+                           s.args.path;
+        stepsHtml += `
+          <div class="step">
+            <div class="step-header" onclick="toggleStep(this)">
+              <span class="tool-badge ${badgeClass}">${badgeLabel}</span>
+              <span class="step-cmd">${escapeHtml(cmdPreview)}</span>
+              <span class="step-toggle">▾ output</span>
+            </div>
+            <div class="step-body">${escapeHtml(s.result || '')}</div>
+          </div>`;
+      });
+      stepsHtml += '</div>';
+    }
+
+    el.innerHTML = `
+      <div class="avatar ai">AI</div>
+      <div class="msg-content">
+        ${stepsHtml}
+        <div class="bubble ai">${escapeHtml(reply)}</div>
+      </div>
+    `;
+    messagesEl.appendChild(el);
+    scrollBottom();
+  }
+
+  function addErrorMessage(err) {
+    const el = document.createElement('div');
+    el.className = 'msg';
+    el.innerHTML = `
+      <div class="avatar ai">!</div>
+      <div class="msg-content">
+        <div class="bubble ai" style="border-color:#3a1a1a;color:#ff8888;">⚠ Error: ${escapeHtml(err)}<br><br>ตรวจสอบ:<br>• Server URL ถูกต้องไหม?<br>• API Key ถูกต้องไหม?<br>• Railway deploy สำเร็จไหม?</div>
+      </div>
+    `;
+    messagesEl.appendChild(el);
+    scrollBottom();
+  }
+
+  function addThinking() {
+    const el = document.createElement('div');
+    el.className = 'thinking';
+    el.innerHTML = `
+      <div class="avatar ai">AI</div>
+      <div class="thinking-bubble">
+        <div class="dot"></div>
+        <div class="dot"></div>
+        <div class="dot"></div>
+      </div>
+    `;
+    messagesEl.appendChild(el);
+    scrollBottom();
+    return el;
+  }
+
+  function toggleStep(header) {
+    const body = header.nextElementSibling;
+    const toggle = header.querySelector('.step-toggle');
+    body.classList.toggle('open');
+    toggle.textContent = body.classList.contains('open') ? '▴ hide' : '▾ output';
+  }
+
+  function updateHistory(text) {
+    const list = document.getElementById('historyList');
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.textContent = text;
+    item.title = text;
+    item.onclick = () => { inputEl.value = text; inputEl.focus(); };
+    list.insertBefore(item, list.firstChild);
+    if (list.children.length > 8) list.removeChild(list.lastChild);
+  }
+
+  function clearChat() {
+    history = [];
+    msgCount = 0;
+    toolCount = 0;
+    document.getElementById('msgCount').textContent = '0';
+    document.getElementById('toolCount').textContent = '0';
+    document.getElementById('historyList').innerHTML = '';
+    messagesEl.innerHTML = `
+      <div class="welcome" id="welcome">
+        <div class="welcome-title">▸ Terminal Agent</div>
+        <div class="welcome-sub">AI ที่คิดเองและรัน command จริงใน server</div>
+        <div class="quick-actions">
+          <button class="quick-btn" onclick="quickSend(this)">สร้างไฟล์ hello.py แล้วรัน</button>
+          <button class="quick-btn" onclick="quickSend(this)">ดู directory ปัจจุบัน</button>
+          <button class="quick-btn" onclick="quickSend(this)">สร้าง Flask app</button>
+          <button class="quick-btn" onclick="quickSend(this)">เช็ค Python version</button>
+          <button class="quick-btn" onclick="quickSend(this)">สร้าง README.md</button>
+          <button class="quick-btn" onclick="quickSend(this)">รัน pip list</button>
+        </div>
+      </div>`;
+  }
+
+  function scrollBottom() {
+    setTimeout(() => { messagesEl.scrollTop = messagesEl.scrollHeight; }, 50);
+  }
+
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+</script>
+</body>
+</html>

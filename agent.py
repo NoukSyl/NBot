@@ -2,23 +2,32 @@ import os
 import subprocess
 import json
 from groq import Groq
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+import uvicorn
 
-client = Groq(api_key=os.environ["GROQ_API_KEY"])
+app = FastAPI()
 
-# === Tools ที่ agent ใช้ได้ ===
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# === Tools ===
 tools = [
     {
         "type": "function",
         "function": {
             "name": "execute_command",
-            "description": "รัน shell command จริงใน terminal เช่น ls, mkdir, cat, python3, git",
+            "description": "รัน shell command จริงใน terminal",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command ที่จะรัน"
-                    }
+                    "command": {"type": "string"}
                 },
                 "required": ["command"]
             }
@@ -28,12 +37,12 @@ tools = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "เขียนไฟล์ลง disk จริงๆ",
+            "description": "เขียนไฟล์ลง disk",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "path ของไฟล์"},
-                    "content": {"type": "string", "description": "เนื้อหาในไฟล์"}
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
                 },
                 "required": ["path", "content"]
             }
@@ -55,62 +64,52 @@ tools = [
     }
 ]
 
-# === Tool Executor ===
 def execute_command(command: str) -> str:
     try:
         result = subprocess.run(
             command, shell=True, capture_output=True,
-            text=True, timeout=30, cwd=os.getcwd()
+            text=True, timeout=30, cwd="/app/workspace"
         )
-        output = result.stdout or ""
-        error = result.stderr or ""
-        return f"stdout:\n{output}\nstderr:\n{error}\nreturncode: {result.returncode}"
+        return f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}\ncode: {result.returncode}"
     except subprocess.TimeoutExpired:
-        return "Error: command timeout (30s)"
+        return "Error: timeout 30s"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e}"
 
 def write_file(path: str, content: str) -> str:
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
-        with open(path, "w", encoding="utf-8") as f:
+        full_path = os.path.join("/app/workspace", path)
+        dir_path = os.path.dirname(full_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"✅ เขียนไฟล์ {path} สำเร็จ ({len(content)} chars)"
+        return f"✅ เขียน {path} สำเร็จ"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e}"
 
 def read_file(path: str) -> str:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        full_path = os.path.join("/app/workspace", path)
+        with open(full_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e}"
 
-def run_tool(name: str, args: dict) -> str:
-    if name == "execute_command":
-        return execute_command(args["command"])
-    elif name == "write_file":
-        return write_file(args["path"], args["content"])
-    elif name == "read_file":
-        return read_file(args["path"])
-    return "Unknown tool"
+def run_tool(name, args):
+    if name == "execute_command": return execute_command(args["command"])
+    if name == "write_file": return write_file(args["path"], args["content"])
+    if name == "read_file": return read_file(args["path"])
+    return "unknown tool"
 
-# === Agent Loop ===
 SYSTEM = """คุณคือ AI agent ที่มี terminal access จริงๆ
-เมื่อได้รับคำสั่ง ให้ใช้ tools เพื่อทำงานจริง ไม่ต้องถามซ้ำ
-ถ้าต้องสร้างไฟล์ → write_file
-ถ้าต้องรัน command → execute_command
-คิดทีละขั้น ดู output แล้วทำขั้นต่อไป"""
+ใช้ tools เพื่อทำงานจริงเสมอ ไม่ต้องอธิบายก่อนทำ
+คิดทีละขั้น ดู output แล้วทำต่อจนเสร็จ"""
 
-def agent(user_input: str):
-    messages = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": user_input}
-    ]
+def run_agent(user_input: str, history: list, client: Groq) -> dict:
+    messages = [{"role": "system", "content": SYSTEM}] + history + [{"role": "user", "content": user_input}]
+    steps = []
 
-    print(f"\n🧠 Agent กำลังคิด...")
-
-    # ReAct loop — วนจนเสร็จ
     while True:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -119,41 +118,47 @@ def agent(user_input: str):
             tool_choice="auto",
             max_tokens=2048
         )
-
         msg = response.choices[0].message
 
-        # ไม่มี tool call = คิดเสร็จแล้ว ตอบ user
         if not msg.tool_calls:
-            print(f"\n🤖 Agent: {msg.content}")
-            break
+            return {"reply": msg.content, "steps": steps}
 
-        # มี tool call → รันจริง
         messages.append(msg)
-
-        for tool_call in msg.tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
-
-            print(f"\n⚙️  Tool: {name}")
-            print(f"   Args: {json.dumps(args, ensure_ascii=False)}")
-
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            args = json.loads(tc.function.arguments)
             result = run_tool(name, args)
-            print(f"   Result: {result[:200]}...")  # แสดงแค่ 200 chars
-
+            steps.append({"tool": name, "args": args, "result": result})
             messages.append({
                 "role": "tool",
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tc.id,
                 "content": result
             })
 
-# === Main ===
-if __name__ == "__main__":
-    print("🚀 AI Terminal Agent (Groq + LLaMA 3.3)")
-    print("พิมพ์ 'exit' เพื่อออก\n")
+# === API Endpoints ===
+class ChatRequest(BaseModel):
+    message: str
+    history: list = []
 
-    while True:
-        user = input("You: ").strip()
-        if user.lower() == "exit":
-            break
-        if user:
-            agent(user)
+@app.get("/", response_class=HTMLResponse)
+def ui():
+    with open("static/index.html", "r", encoding="utf-8") as f:
+        return f.read()
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "agent": "AI Terminal Agent"}
+
+@app.post("/chat")
+async def chat(req: ChatRequest, request: Request):
+    api_key = request.headers.get("X-Groq-API-Key") or os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        return {"error": "No API key provided"}
+    client = Groq(api_key=api_key)
+    result = run_agent(req.message, req.history, client)
+    return result
+
+if __name__ == "__main__":
+    os.makedirs("/app/workspace", exist_ok=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
