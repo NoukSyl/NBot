@@ -113,7 +113,7 @@ def run_agent(user_input: str, history: list, client: Groq) -> dict:
     while True:
         try:
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
