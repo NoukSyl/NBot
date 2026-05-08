@@ -145,13 +145,16 @@ def run_agent(user_input: str, history: list, client: Groq) -> dict:
     for _ in range(max_retries):
         try:
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile", # เปลี่ยนให้ตรงกับ Groq
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                max_tokens=2048,
-                temperature=0.2 # ต่ำเพื่อให้แม่นยำทางเทคนิค
-            )
+            model="openai/gpt-oss-120b",
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=4096, 
+            temperature=0.3,
+            top_p=0.9,
+            presence_penalty=0.1 
+)
+
         except Exception as e:
             return {"reply": f"LLM error: {str(e)}", "steps": steps}
 
