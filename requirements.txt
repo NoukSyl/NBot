@@ -1,8 +1,1 @@
-google-generativeai
-supabase
-fastapi
-uvicorn
-python-multipart
-aiofiles
-supabase
-postgrest
+discord.py>=2.3.0
