@@ -610,22 +610,94 @@ async def build_server_from_template(guild: discord.Guild, key: str) -> dict:
         created["categories"] += 1
         await asyncio.sleep(0.3)
         for ch_spec in cat_spec["channels"]:
-            await create_channel_of_type(guild, ch_spec["name"], ch_spec["type"], category, ch_spec.get("topic"))
+            await create_channel_of_type(
+                guild,
+                ch_spec["name"],
+                ch_spec["type"],
+                category,
+                ch_spec.get("topic"),
+            )
             created["channels"] += 1
             await asyncio.sleep(0.3)
 
     return created
 
 
+async def cleanup_server_channels(
+    guild: discord.Guild,
+    mode: str,
+    keep_channel_id: Optional[int] = None,
+) -> dict:
+    """
+    Clean up existing channels before template setup.
+
+    mode:
+      - "all": delete every channel/category.
+      - "except_current": delete every channel except the channel where /setup was run,
+        then remove empty categories (while keeping the current channel's category).
+      - "none": don't delete anything.
+    """
+    result = {"channels": 0, "categories": 0}
+
+    if mode == "none":
+        return result
+
+    keep_category_id = None
+    if mode == "except_current" and keep_channel_id:
+        current_channel = guild.get_channel(keep_channel_id)
+        if current_channel and current_channel.category:
+            keep_category_id = current_channel.category.id
+
+    # Delete channels first. Categories are handled separately so that the
+    # command channel can survive when "except current channel" is selected.
+    for channel in list(guild.channels):
+        if isinstance(channel, discord.CategoryChannel):
+            continue
+        if mode == "except_current" and channel.id == keep_channel_id:
+            continue
+
+        try:
+            await channel.delete(reason="Server template setup cleanup")
+            result["channels"] += 1
+            await asyncio.sleep(0.3)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    # Delete categories after their channels are gone.
+    for category in list(guild.categories):
+        if mode == "except_current" and category.id == keep_category_id:
+            continue
+
+        try:
+            await category.delete(reason="Server template setup cleanup")
+            result["categories"] += 1
+            await asyncio.sleep(0.3)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    return result
+
+
 class ConfirmBuildView(discord.ui.View):
-    def __init__(self, author_id: int, template_key: str):
+    def __init__(
+        self,
+        author_id: int,
+        template_key: str,
+        cleanup_mode: str = "none",
+        command_channel_id: Optional[int] = None,
+    ):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.template_key = template_key
+        self.cleanup_mode = cleanup_mode
+        self.command_channel_id = command_channel_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Only the person who ran /setup can confirm this.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Only the person who ran /setup can confirm this.",
+                ephemeral=True,
+            )
             return False
         return True
 
@@ -633,20 +705,38 @@ class ConfirmBuildView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
+
         tpl = TEMPLATES[self.template_key]
+        cleanup_text = {
+            "all": "Existing channels/categories will be deleted first.",
+            "except_current": "Existing channels will be deleted except this command channel.",
+            "none": "Existing channels/categories will be kept.",
+        }[self.cleanup_mode]
+
         building_embed = discord.Embed(
             title=f"{tpl['emoji']} Building \"{tpl['label']}\"...",
-            description="This can take a minute depending on server size. Please don't close this.",
+            description=(
+                "This can take a minute depending on server size. Please don't close this.\n\n"
+                f"🧹 {cleanup_text}"
+            ),
             color=tpl["color"],
         )
         await interaction.response.edit_message(embed=building_embed, view=self)
 
         try:
+            cleaned = await cleanup_server_channels(
+                interaction.guild,
+                self.cleanup_mode,
+                self.command_channel_id,
+            )
             created = await build_server_from_template(interaction.guild, self.template_key)
         except discord.Forbidden:
             fail_embed = discord.Embed(
                 title="❌ Missing permissions",
-                description="I need the **Manage Channels** and **Manage Roles** permissions to build this template.",
+                description=(
+                    "I need the **Manage Channels** and **Manage Roles** permissions "
+                    "to clean up and build this template."
+                ),
                 color=discord.Color.red(),
             )
             return await interaction.edit_original_response(embed=fail_embed, view=None)
@@ -656,22 +746,101 @@ class ConfirmBuildView(discord.ui.View):
                 description=f"Setup stopped partway through: {exc}",
                 color=discord.Color.red(),
             )
-            return await interaction.edit_original_response(embed=fail_embed, view=None)
+            try:
+                return await interaction.edit_original_response(embed=fail_embed, view=None)
+            except discord.HTTPException:
+                return
 
         done_embed = discord.Embed(
             title=f"{tpl['emoji']} \"{tpl['label']}\" is ready!",
             description=(
+                f"🧹 Deleted **{cleaned['channels']}** channels and "
+                f"**{cleaned['categories']}** categories.\n"
                 f"Created **{created['roles']}** roles, **{created['categories']}** categories, "
                 f"and **{created['channels']}** channels. Enjoy your new server! 🎉"
             ),
             color=tpl["color"],
         )
-        await interaction.edit_original_response(embed=done_embed, view=None)
+        try:
+            await interaction.edit_original_response(embed=done_embed, view=None)
+        except discord.HTTPException:
+            # If the command channel itself was deleted, the interaction response
+            # may no longer be editable. The setup itself has already completed.
+            pass
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="✖️")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cancelled_embed = discord.Embed(description="Setup cancelled — nothing was created.", color=discord.Color.greyple())
+        cancelled_embed = discord.Embed(
+            description="Setup cancelled — nothing was created or deleted.",
+            color=discord.Color.greyple(),
+        )
         await interaction.response.edit_message(embed=cancelled_embed, view=None)
+
+
+class CleanupChoiceView(discord.ui.View):
+    def __init__(self, author_id: int, template_key: str, command_channel_id: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.template_key = template_key
+        self.command_channel_id = command_channel_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Only the person who ran /setup can choose the cleanup option.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def choose(self, interaction: discord.Interaction, mode: str, title: str, description: str):
+        tpl = TEMPLATES[self.template_key]
+        embed = discord.Embed(
+            title=f"{tpl['emoji']} {tpl['label']}",
+            description=(
+                f"{tpl['description']}\n\n"
+                f"{template_summary(self.template_key)}\n\n"
+                f"🧹 **Cleanup:** {description}"
+            ),
+            color=tpl["color"],
+        )
+        embed.set_footer(text="Review the choice below, then press Build it! to start.")
+        await interaction.response.edit_message(
+            embed=embed,
+            view=ConfirmBuildView(
+                self.author_id,
+                self.template_key,
+                cleanup_mode=mode,
+                command_channel_id=self.command_channel_id,
+            ),
+        )
+
+    @discord.ui.button(label="ลบช่องทั้งหมด", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def delete_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.choose(
+            interaction,
+            "all",
+            "ลบทั้งหมด",
+            "ลบ **ช่องและหมวดหมู่ทั้งหมด** ในเซิร์ฟเวอร์ก่อน Setup (รวมช่องที่พิมพ์คำสั่ง)",
+        )
+
+    @discord.ui.button(label="ลบยกเว้นช่องนี้", style=discord.ButtonStyle.danger, emoji="📌")
+    async def delete_except_current(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.choose(
+            interaction,
+            "except_current",
+            "ลบยกเว้นช่องนี้",
+            "ลบ **ช่องทั้งหมด ยกเว้นช่องที่พิมพ์ /setup** และลบหมวดหมู่อื่นที่ไม่ใช่หมวดของช่องนี้",
+        )
+
+    @discord.ui.button(label="ไม่ลบช่องไหนเลย", style=discord.ButtonStyle.secondary, emoji="🛡️")
+    async def delete_none(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.choose(
+            interaction,
+            "none",
+            "ไม่ลบ",
+            "เก็บ **ช่องและหมวดหมู่เดิมทั้งหมด** แล้วสร้าง Template เพิ่มเข้าไป",
+        )
 
 
 class TemplateSelect(discord.ui.Select):
@@ -686,21 +855,43 @@ class TemplateSelect(discord.ui.Select):
             )
             for key, tpl in TEMPLATES.items()
         ]
-        super().__init__(placeholder="Choose a server template...", options=options, min_values=1, max_values=1)
+        super().__init__(
+            placeholder="Choose a server template...",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("❌ Only the person who ran /setup can pick a template.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ Only the person who ran /setup can pick a template.",
+                ephemeral=True,
+            )
 
         key = self.values[0]
         tpl = TEMPLATES[key]
-        confirm_embed = discord.Embed(
+        choice_embed = discord.Embed(
             title=f"{tpl['emoji']} {tpl['label']}",
-            description=f"{tpl['description']}\n\n{template_summary(key)}",
+            description=(
+                f"{tpl['description']}\n\n"
+                f"{template_summary(key)}\n\n"
+                "🧹 **ก่อน Setup ต้องการจัดการช่องเดิมอย่างไร?**\n"
+                "เลือกได้ 3 แบบด้านล่าง"
+            ),
             color=tpl["color"],
         )
-        confirm_embed.set_footer(text="This adds new roles/channels — it won't delete anything that already exists.")
-        await interaction.response.edit_message(embed=confirm_embed, view=ConfirmBuildView(self.author_id, key))
+        choice_embed.set_footer(
+            text="การลบช่องจะเกิดขึ้นเมื่อกด Build it! เท่านั้น"
+        )
+        await interaction.response.edit_message(
+            embed=choice_embed,
+            view=CleanupChoiceView(
+                self.author_id,
+                key,
+                interaction.channel.id,
+            ),
+        )
 
 
 class TemplateSelectView(discord.ui.View):
@@ -711,24 +902,40 @@ class TemplateSelectView(discord.ui.View):
 
 class SetupGroup(app_commands.Group):
     def __init__(self):
-        super().__init__(name="setup", description="Auto-build this server from a ready-made template")
+        super().__init__(
+            name="setup",
+            description="Auto-build this server from a ready-made template",
+        )
 
-    @app_commands.command(name="templates", description="Pick a template to instantly build out this server")
+    @app_commands.command(
+        name="templates",
+        description="Pick a template to instantly build out this server",
+    )
     @app_commands.checks.has_permissions(administrator=True)
     async def templates(self, interaction: discord.Interaction):
         e = discord.Embed(
             title="🏗️ Server Auto-Setup",
             description=(
-                "Pick a template below and I'll build out roles, categories, and channels for you "
-                "— perfect for a brand-new, empty server.\n\nNothing existing gets deleted or changed."
+                "Pick a template below and I'll build out roles, categories, and channels for you.\n\n"
+                "ก่อนเริ่ม Setup จะมีตัวเลือกให้ **ลบช่องเดิมทั้งหมด / ลบยกเว้นช่องคำสั่ง / ไม่ลบอะไรเลย**"
             ),
             color=discord.Color.blurple(),
         )
         for key, tpl in TEMPLATES.items():
-            e.add_field(name=f"{tpl['emoji']} {tpl['label']}", value=tpl["description"], inline=False)
-        await interaction.response.send_message(embed=e, view=TemplateSelectView(interaction.user.id))
+            e.add_field(
+                name=f"{tpl['emoji']} {tpl['label']}",
+                value=tpl["description"],
+                inline=False,
+            )
+        await interaction.response.send_message(
+            embed=e,
+            view=TemplateSelectView(interaction.user.id),
+        )
 
-    @app_commands.command(name="wipe", description="Delete ALL channels and categories in this server (careful!)")
+    @app_commands.command(
+        name="wipe",
+        description="Delete ALL channels and categories in this server (careful!)",
+    )
     @app_commands.checks.has_permissions(administrator=True)
     async def wipe(self, interaction: discord.Interaction):
         warn_embed = discord.Embed(
@@ -739,7 +946,10 @@ class SetupGroup(app_commands.Group):
             ),
             color=discord.Color.red(),
         )
-        await interaction.response.send_message(embed=warn_embed, view=WipeConfirmView(interaction.user.id))
+        await interaction.response.send_message(
+            embed=warn_embed,
+            view=WipeConfirmView(interaction.user.id),
+        )
 
 
 class WipeConfirmView(discord.ui.View):
@@ -749,16 +959,27 @@ class WipeConfirmView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Only the person who ran this command can confirm it.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Only the person who ran this command can confirm it.",
+                ephemeral=True,
+            )
             return False
         return True
 
-    @discord.ui.button(label="Yes, delete everything", style=discord.ButtonStyle.red, emoji="🗑️")
+    @discord.ui.button(
+        label="Yes, delete everything",
+        style=discord.ButtonStyle.red,
+        emoji="🗑️",
+    )
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
-            embed=discord.Embed(description="🗑️ Deleting channels...", color=discord.Color.red()), view=self
+            embed=discord.Embed(
+                description="🗑️ Deleting channels...",
+                color=discord.Color.red(),
+            ),
+            view=self,
         )
         count = 0
         for channel in list(interaction.guild.channels):
@@ -769,16 +990,22 @@ class WipeConfirmView(discord.ui.View):
             except discord.HTTPException:
                 pass
         await interaction.edit_original_response(
-            embed=discord.Embed(description=f"✅ Deleted {count} channels/categories.", color=discord.Color.green()),
+            embed=discord.Embed(
+                description=f"✅ Deleted {count} channels/categories.",
+                color=discord.Color.green(),
+            ),
             view=None,
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="✖️")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=discord.Embed(description="Cancelled — nothing was deleted.", color=discord.Color.greyple()), view=None
+            embed=discord.Embed(
+                description="Cancelled — nothing was deleted.",
+                color=discord.Color.greyple(),
+            ),
+            view=None,
         )
-
 
 bot.tree.add_command(SetupGroup())
 
